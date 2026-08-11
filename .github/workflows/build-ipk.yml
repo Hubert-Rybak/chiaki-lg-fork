@@ -89,7 +89,7 @@ jobs:
           sudo install -m 0755 \
             "$install_dir/ares-cli-rs-${ARES_CLI_VERSION}-linux-x86_64/ares-package" \
             /usr/local/bin/ares-package
-          ares-package --version
+          ares-package --help >/dev/null
 
       - name: Restore cross-compiled dependency cache
         id: cross-deps-cache
