@@ -18,6 +18,8 @@ env:
   WEBOS_NDK_SHA256: 04ad3311b48b4557a7002aef56ae2e167478e8e129f37daac04649bddf813616
   ARES_CLI_VERSION: v0.5.0
   ARES_CLI_SHA256: 7afce7bebb0da5b87b6e0a6603ad3bcf5596efb563999af9122f96acbd20699b
+  NANOPB_VERSION: 0.4.9.1
+  PYTHON_PROTOBUF_VERSION: 5.28.3
 
 jobs:
   build-ipk:
@@ -58,6 +60,13 @@ jobs:
             protobuf-compiler \
             python3-pip \
             wget
+
+      - name: Install nanopb generator dependencies
+        shell: bash
+        run: |
+          python3 -m pip install --user --disable-pip-version-check \
+            "nanopb==${NANOPB_VERSION}" \
+            "protobuf==${PYTHON_PROTOBUF_VERSION}"
 
       - name: Install webOS NDK
         shell: bash
