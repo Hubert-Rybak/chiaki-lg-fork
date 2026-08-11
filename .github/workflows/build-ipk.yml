@@ -55,6 +55,7 @@ jobs:
             make \
             ninja-build \
             pkg-config \
+            protobuf-compiler \
             python3-pip \
             wget
 
