@@ -2,6 +2,10 @@ name: Build IPK
 
 on:
   push:
+    branches:
+      - '**'
+    tags:
+      - 'v*.*.*'
   pull_request:
   workflow_dispatch:
 
@@ -27,10 +31,54 @@ jobs:
     name: Build webOS IPK
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    outputs:
+      artifact_name: ${{ steps.build-metadata.outputs.artifact_name }}
+      release_version: ${{ steps.build-metadata.outputs.release_version }}
 
     steps:
       - name: Check out chiaki-lg
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select build configuration
+        id: build-metadata
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Release tags must use the vMAJOR.MINOR.PATCH format." >&2
+              exit 1
+            fi
+
+            version="${GITHUB_REF_NAME#v}"
+            build_type="Release"
+            artifact_name="chiaki-lg-${GITHUB_REF_NAME}"
+
+            python3 - "$version" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path("packaging/appinfo.json")
+          appinfo = json.loads(path.read_text(encoding="utf-8"))
+          appinfo["version"] = sys.argv[1]
+          path.write_text(json.dumps(appinfo, indent=2) + "\n", encoding="utf-8")
+          PY
+          else
+            version="$(python3 -c 'import json; print(json.load(open("packaging/appinfo.json", encoding="utf-8"))["version"])')"
+            build_type="Debug"
+            artifact_name="chiaki-lg-debug-${GITHUB_SHA:0:8}"
+          fi
+
+          {
+            echo "WEBOS_BUILD_TYPE=$build_type"
+            echo "PACKAGE_VERSION=$version"
+          } >> "$GITHUB_ENV"
+          {
+            echo "artifact_name=$artifact_name"
+            echo "release_version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Building $build_type IPK version $version"
 
       - name: Check out chiaki-ng
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,13 +170,12 @@ jobs:
           key: webos-deps-v1-${{ runner.os }}-${{ hashFiles('build-webos.sh') }}
 
       - name: Verify IPK
-        id: artifact
         shell: bash
         run: |
           shopt -s nullglob
           ipks=(build-webos/*.ipk)
-          if (( ${#ipks[@]} == 0 )); then
-            echo "No IPK was produced in build-webos/" >&2
+          if (( ${#ipks[@]} != 1 )); then
+            echo "Expected exactly one IPK in build-webos/, found ${#ipks[@]}." >&2
             exit 1
           fi
 
@@ -137,13 +184,72 @@ jobs:
             file "$ipk"
             sha256sum "$ipk"
           done
-          echo "short_sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$WEBOS_BUILD_TYPE" == "Debug" ]]; then
+            inspect_dir="$(mktemp -d "$RUNNER_TEMP/ipk-inspect.XXXXXX")"
+            dpkg-deb --extract "${ipks[0]}" "$inspect_dir"
+            packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
+
+            if [[ -z "$packaged_binary" ]]; then
+              echo "Could not find chiaki-webos inside ${ipks[0]}." >&2
+              exit 1
+            fi
+
+            sections="$("$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" --sections "$packaged_binary")"
+            if ! grep -F '.debug_info' <<< "$sections" >/dev/null; then
+              echo "Debug IPK executable does not contain a .debug_info section." >&2
+              exit 1
+            fi
+
+            echo "Packaged executable contains .debug_info:"
+            file "$packaged_binary"
+          fi
 
       - name: Upload IPK artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: chiaki-lg-ipk-${{ steps.artifact.outputs.short_sha }}
+          name: ${{ steps.build-metadata.outputs.artifact_name }}
           path: build-webos/*.ipk
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build-ipk
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release IPK
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.build-ipk.outputs.artifact_name }}
+          path: release-assets
+
+      - name: Create release and attach IPK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build-ipk.outputs.release_version }}
+        run: |
+          shopt -s nullglob
+          ipks=(release-assets/*.ipk)
+          if (( ${#ipks[@]} != 1 )); then
+            echo "Expected exactly one release IPK, found ${#ipks[@]}." >&2
+            exit 1
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${ipks[@]}" \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "${ipks[@]}" \
+              --generate-notes \
+              --title "Chiaki-lg $RELEASE_VERSION" \
+              --verify-tag \
+              --repo "$GITHUB_REPOSITORY"
+          fi

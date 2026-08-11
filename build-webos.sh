@@ -8,6 +8,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHIAKI_NG_DIR="$(realpath "${1:-$SCRIPT_DIR/../chiaki-ng}")"
 BUILD_DIR="$SCRIPT_DIR/build-webos"
 OUR_STAGING="/tmp/webos-staging"
+WEBOS_BUILD_TYPE="${WEBOS_BUILD_TYPE:-Release}"
+
+case "$WEBOS_BUILD_TYPE" in
+    Debug|Release|RelWithDebInfo|MinSizeRel) ;;
+    *)
+        echo "ERROR: Unsupported WEBOS_BUILD_TYPE '$WEBOS_BUILD_TYPE'."
+        echo "  Expected Debug, Release, RelWithDebInfo, or MinSizeRel."
+        exit 1
+        ;;
+esac
 
 # ── Validate toolchain ────────────────────────────────────────────────────────
 if [[ -z "${TOOLCHAIN_DIR:-}" ]]; then
@@ -70,6 +80,7 @@ export PKG_CONFIG="$PKG_CONFIG_WRAPPER"
 echo "-- Toolchain: CC=$CC  PREFIX=$CROSS_PREFIX"
 echo "-- Staging:   $OUR_STAGING"
 echo "-- Sysroot:   $SYSROOT"
+echo "-- Build type: $WEBOS_BUILD_TYPE"
 echo ""
 
 mkdir -p "$OUR_STAGING"
@@ -574,7 +585,7 @@ rm -rf "$BUILD_DIR/CMakeFiles"
 # SDL2 and other sysroot libs are found via CMAKE_FIND_ROOT_PATH instead.
 cmake -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_BUILD_TYPE="$WEBOS_BUILD_TYPE" \
     -DWEBOS_BUILD=ON \
     -DWEBOS_STAGING_DIR="$OUR_STAGING" \
     -DCHIAKI_SOURCE_DIR="$CHIAKI_NG_DIR" \
