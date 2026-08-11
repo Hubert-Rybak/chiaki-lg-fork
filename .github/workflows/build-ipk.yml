@@ -20,6 +20,7 @@ env:
   ARES_CLI_SHA256: 7afce7bebb0da5b87b6e0a6603ad3bcf5596efb563999af9122f96acbd20699b
   NANOPB_VERSION: 0.4.9.1
   PYTHON_PROTOBUF_VERSION: 5.28.3
+  GRPCIO_TOOLS_VERSION: 1.68.0
 
 jobs:
   build-ipk:
@@ -66,7 +67,8 @@ jobs:
         run: |
           python3 -m pip install --user --disable-pip-version-check \
             "nanopb==${NANOPB_VERSION}" \
-            "protobuf==${PYTHON_PROTOBUF_VERSION}"
+            "protobuf==${PYTHON_PROTOBUF_VERSION}" \
+            "grpcio-tools==${GRPCIO_TOOLS_VERSION}"
 
       - name: Install webOS NDK
         shell: bash
