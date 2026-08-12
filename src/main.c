@@ -40,6 +40,7 @@
 #include "stats.h"
 #include "config_import.h"
 #include "app_id.h"
+#include "webos_keys.h"
 
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
@@ -129,6 +130,9 @@ static void log_cb(ChiakiLogLevel level, const char *msg, void *user)
 
 static void session_event_cb(ChiakiEvent *event, void *user)
 {
+    InputContext *input_ctx = user;
+    input_handle_session_event(input_ctx, event);
+
     switch (event->type)
     {
     case CHIAKI_EVENT_CONNECTED:
@@ -140,6 +144,12 @@ static void session_event_cb(ChiakiEvent *event, void *user)
             (const uint8_t *)"0000", 4);
         break;
     case CHIAKI_EVENT_RUMBLE:
+    case CHIAKI_EVENT_TRIGGER_EFFECTS:
+    case CHIAKI_EVENT_LED_COLOR:
+    case CHIAKI_EVENT_PLAYER_INDEX:
+    case CHIAKI_EVENT_HAPTIC_INTENSITY:
+    case CHIAKI_EVENT_TRIGGER_INTENSITY:
+        /* Applied asynchronously by input_handle_session_event(). */
         break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
@@ -1034,10 +1044,15 @@ int main(int argc, char *argv[])
     setup_ssl_ca_bundle();
 
     // ── SDL2 init ────────────────────────────────────────────────────────────
-    // We use direct evdev + EVIOCGRAB for the gamepad (in input.c), so we
-    // do NOT need SDL_INIT_GAMECONTROLLER.  The grab at the kernel level
-    // prevents webOS from seeing B→Back / A→OK / Guide→Home at all.
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
+    // webosbrew/SDL-webOS latches these access-policy hints when the window is
+    // created. They keep Back/Exit/Guide usable inside the app and prevent the
+    // launcher ribbon from covering the stream.
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -1088,9 +1103,7 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] SDL window created OK\n");
 
-    // We don't need SDL_SetWindowGrab for the gamepad because we use EVIOCGRAB
-    // directly on the evdev fd in input.c.  Window grab is still useful to keep
-    // the webOS compositor from stealing keyboard focus from the TV remote path.
+    // Keep Magic Remote keyboard focus attached to the fullscreen app.
     SDL_SetWindowGrab(g_window, SDL_TRUE);
 
     // Accelerated renderer — uses OpenGL ES on webOS, which respects the
@@ -1117,7 +1130,11 @@ int main(int argc, char *argv[])
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
 
-    SDL_ShowCursor(SDL_DISABLE);
+    InputContext *input_ctx = input_init();
+    if (!input_ctx)
+        app_log_always("[INPUT] Initialization failed; continuing without a controller\n");
+
+    SDL_ShowCursor(SDL_ENABLE);
 
     // ── Stats overlay state (toggled at runtime) ─────────────────────────────
     StatsOverlay stats_overlay;
@@ -1148,12 +1165,13 @@ show_launcher:
     g_have_video_frame = false;
 
     app_log("[APP] Showing launcher UI\n");
+    SDL_ShowCursor(SDL_ENABLE);
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
     SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
     UIResult ui_result = ui_run_registration(
-        g_renderer, &cfg, config_path, &chiaki_log, launcher_message);
+        g_renderer, &cfg, config_path, &chiaki_log, launcher_message, input_ctx);
     launcher_message[0] = '\0';
 
     // Back to transparent so NDL plane shows through during stream
@@ -1170,6 +1188,8 @@ show_launcher:
 
     if (g_should_exit)
         goto cleanup_sdl;
+
+    SDL_ShowCursor(SDL_DISABLE);
 
     // The launcher can update logging settings and reload cfg in place.
     chiaki_log_init(&chiaki_log, cfg.log_level, log_cb, NULL);
@@ -1224,7 +1244,7 @@ show_launcher:
     }
     app_log("[APP] SS4S player opened\n");
 
-    // ── Video / Audio / Input init ────────────────────────────────────────────
+    // ── Video / Audio init ────────────────────────────────────────────────────
     // Determine codec once - used by both video_init (SS4S) and info.video_profile.codec (Chiaki).
     bool force_h264    = cfg.video_codec && strcmp(cfg.video_codec, "h264") == 0;
     bool want_h265_hdr = cfg.video_codec && strcmp(cfg.video_codec, "h265_hdr") == 0;
@@ -1269,13 +1289,12 @@ show_launcher:
     }
     app_log("[APP] audio_init OK\n");
 
-    InputContext *input_ctx = input_init();
-
     // ── Build connect info (done once, reused across reconnects) ──────────────
     ChiakiConnectInfo info;
     memset(&info, 0, sizeof(info));
     info.host = cfg.host;
     info.ps5  = cfg.ps5;
+    info.enable_dualsense = cfg.ps5;
 
     size_t decoded_len;
 
@@ -1459,7 +1478,7 @@ show_launcher:
             break;
         }
 
-        chiaki_session_set_event_cb(&g_session, session_event_cb, NULL);
+        chiaki_session_set_event_cb(&g_session, session_event_cb, input_ctx);
         chiaki_session_set_video_sample_cb(&g_session,
             video_sample_cb, video_ctx);
         app_log("[APP] Video callback registered\n");
@@ -1470,6 +1489,10 @@ show_launcher:
                 (void *)audio_sink.header_cb,
                 (void *)audio_sink.frame_cb,
                 audio_sink.user);
+
+        ChiakiAudioSink haptics_sink = input_make_haptics_sink(input_ctx);
+        chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
+        app_log("[APP] Haptics sink registered\n");
 
         err = chiaki_session_start(&g_session);
         if (err != CHIAKI_ERR_SUCCESS)
@@ -1482,9 +1505,7 @@ show_launcher:
             break;
         }
 
-        // Wire the evdev reader thread to this session so it can push
-        // controller state updates. The reader thread was started in
-        // input_init() and waits for a non-NULL session pointer.
+        // Attach the SDL controller state/feedback path to this session.
         input_set_session(input_ctx, &g_session);
         app_log_always("[APP] Session started — entering event loop\n");
 
@@ -1508,21 +1529,18 @@ show_launcher:
                     g_session_ended = true;
                     break;
                 }
-                // TV remote Back button → exit the app (not forwarded to PS5).
-                // All gamepad buttons are handled in input.c's evdev reader thread
-                // via EVIOCGRAB — the system never sees them.
+                // TV remote Back or Red → disconnect/exit (not forwarded to PS5).
                 if (ev.type == SDL_KEYDOWN &&
-                    (ev.key.keysym.sym == (SDL_Keycode)1073742094 ||  // WEBOS_KEY_BACK
-                     ev.key.keysym.sym == SDLK_ESCAPE))
+                    webos_event_is_back_or_red(&ev.key))
                 {
-                    app_log("[APP] Remote Back/Escape — exiting\n");
+                    app_log("[APP] Remote Back/Red — disconnecting\n");
                     g_should_exit   = true;
                     g_session_ended = true;
                     break;
                 }
                 // ── Block TV remote navigation keys during streaming ─────────
                 // During an active stream, the TV remote should not send any
-                // input to the PS5 — only the gamepad (via evdev in input.c)
+                // input to the PS5 — only the SDL GameController path
                 // controls the console.  Remote keys we handle here:
                 //   UP (short press) → toggle stats overlay
                 //   All other nav keys → swallowed silently
@@ -1535,14 +1553,12 @@ show_launcher:
                     bool is_up = (k == SDLK_UP || (int)k == 1073741906);    // WEBOS_KEY_UP
 
                     // Block ALL remote directional / navigation keys from
-                    // reaching the PS5.  Gamepad D-pad is handled exclusively
-                    // through the evdev reader thread in input.c.
+                    // reaching the PS5. Gamepad D-pad uses SDL controller events.
                     bool is_remote_nav = is_up
                         || k == SDLK_DOWN   || (int)k == 1073741905   // WEBOS_KEY_DOWN
                         || k == SDLK_LEFT   || (int)k == 1073741904   // WEBOS_KEY_LEFT
                         || k == SDLK_RIGHT  || (int)k == 1073741903   // WEBOS_KEY_RIGHT
-                        || k == SDLK_RETURN || (int)k == 1073741912   // WEBOS_KEY_ENTER / OK
-                        || (int)k == 1073742093                        // WEBOS_KEY_RED
+                        || k == SDLK_RETURN || k == SDLK_KP_ENTER
                         || (int)k == 1073742089                        // WEBOS_KEY_GREEN
                         || (int)k == 1073742090                        // WEBOS_KEY_YELLOW
                         || (int)k == 1073742091;                       // WEBOS_KEY_BLUE
@@ -1560,8 +1576,10 @@ show_launcher:
                         continue;
                     }
                 }
-                input_handle_event(&ev, input_ctx, &g_session);
+                input_handle_event(input_ctx, &ev);
             }
+
+            input_pump(input_ctx);
 
             // While we're waiting for the first video sample, show an opaque
             // loading screen. Once video starts, switch back to transparent
@@ -1635,11 +1653,11 @@ show_launcher:
             SDL_Delay(500);
         }
 
-        // Detach session from evdev reader before tearing down the session.
-        input_set_session(input_ctx, NULL);
         app_log_always("[APP] Stopping session (reason=%d)\n", (int)g_quit_reason);
         chiaki_session_stop(&g_session);
         chiaki_session_join(&g_session);
+        // No callbacks can race feedback release after the session is joined.
+        input_set_session(input_ctx, NULL);
         chiaki_session_fini(&g_session);
 
         // ── Reconnect decision ────────────────────────────────────────────────
@@ -1667,7 +1685,6 @@ show_launcher:
     }
 
 cleanup_session_ctx:
-    input_fini(input_ctx);
     audio_fini(audio_ctx);
     video_fini(video_ctx);
     SS4S_PlayerClose(ss4s_player);
@@ -1677,6 +1694,7 @@ cleanup_session_ctx:
         goto show_launcher;
 
 cleanup_sdl:
+    input_fini(input_ctx);
     SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);
     SDL_Quit();

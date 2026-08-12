@@ -11,6 +11,7 @@ option(WEBOS_BUILD "Cross-compile for webOS TV" OFF)
 set(WEBOS_STAGING_DIR "/tmp/webos-staging" CACHE PATH "Cross-compiled deps staging dir")
 set(CHIAKI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../chiaki-ng" CACHE PATH "chiaki-ng source directory")
 set(APP_ID "org.homebrew.chiaki.fork" CACHE STRING "webOS application ID")
+set(SDL2_BUNDLED_LIBRARY "" CACHE FILEPATH "SDL-webOS runtime library bundled in the IPK")
 
 if(NOT APP_ID MATCHES "^[a-z0-9][a-z0-9.-]+$")
     message(FATAL_ERROR "Invalid webOS APP_ID: ${APP_ID}")
@@ -136,6 +137,7 @@ add_executable(chiaki-webos
     src/video.c
     src/audio.c
     src/input.c
+    src/dualsense.c
     src/ui.c
     src/stats.c
 )
@@ -192,8 +194,18 @@ install(FILES
     packaging/appinfo.json
     packaging/icon.png
     packaging/largeIcon.png
+    THIRD-PARTY-NOTICES.md
     DESTINATION .
 )
+if(SDL2_BUNDLED_LIBRARY)
+    if(NOT EXISTS "${SDL2_BUNDLED_LIBRARY}")
+        message(FATAL_ERROR "Bundled SDL runtime not found: ${SDL2_BUNDLED_LIBRARY}")
+    endif()
+    install(FILES "${SDL2_BUNDLED_LIBRARY}"
+        DESTINATION lib
+        RENAME libSDL2-2.0.so.0
+    )
+endif()
 # Install ss4s module .so files into lib/ alongside the binary
 install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
     DESTINATION lib

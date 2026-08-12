@@ -27,6 +27,10 @@ env:
   NANOPB_VERSION: 0.4.9.1
   PYTHON_PROTOBUF_VERSION: 5.28.3
   GRPCIO_TOOLS_VERSION: 1.68.0
+  SDL2_WEBOS_RELEASE: release-2.30.12-webos.5
+  SDL2_WEBOS_VERSION: 2.30.12
+  SDL2_WEBOS_SONAME: libSDL2-2.0.so.0.3000.12
+  SDL2_WEBOS_SHA256: 4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334
 
 jobs:
   build-ipk:
@@ -139,6 +143,15 @@ jobs:
             tests/config_import_test.c \
             -o "$RUNNER_TEMP/config-import-test"
           "$RUNNER_TEMP/config-import-test"
+
+      - name: Test DualSense Bluetooth protocol
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/dualsense_test.c src/dualsense.c \
+            -pthread \
+            -o "$RUNNER_TEMP/dualsense-test"
+          "$RUNNER_TEMP/dualsense-test"
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -268,17 +281,20 @@ jobs:
           packaged_root="$(dirname "$packaged_appinfo")"
           cmp packaging/icon.png "$packaged_root/icon.png"
           cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
+          test -s "$packaged_root/lib/libSDL2-2.0.so.0"
+          test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
+
+          packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
+          if [[ -z "$packaged_binary" ]]; then
+            echo "Could not find chiaki-webos inside ${ipks[0]}." >&2
+            exit 1
+          fi
+          "$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" --dynamic "$packaged_binary" \
+            | grep -F 'Shared library: [libSDL2-2.0.so.0]'
 
           if [[ "$WEBOS_BUILD_TYPE" == "Debug" ]]; then
             if [[ "$ipk_name" != *"+$BUILD_COMMIT_SHORT"* ]]; then
               echo "Development IPK filename '$ipk_name' does not contain commit '$BUILD_COMMIT_SHORT'." >&2
-              exit 1
-            fi
-
-            packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
-
-            if [[ -z "$packaged_binary" ]]; then
-              echo "Could not find chiaki-webos inside ${ipks[0]}." >&2
               exit 1
             fi
 

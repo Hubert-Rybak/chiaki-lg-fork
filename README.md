@@ -16,7 +16,9 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
-- **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`)
+- **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads through SDL's standardized controller mapping
+- **Controller feedback** — rumble for supported pads, PS5 haptic-to-rumble feedback, and DualSense adaptive triggers, lightbar, and player LEDs
+- **Magic Remote friendly** — d-pad navigation, pointer hover/click, number-pad IP entry, and Red as a Back/disconnect substitute
 - **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to import registration credentials and the matching manual-host IP
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
@@ -146,16 +148,30 @@ Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`
 
 Connect a gamepad via Bluetooth or USB. Supported controllers include DualSense, DualShock 4, Xbox Wireless Controller, and most HID-compliant gamepads.
 
-The app uses direct evdev access with `EVIOCGRAB` to take exclusive control of the gamepad at the kernel level, preventing webOS from intercepting buttons (B→Back, A→OK, Guide→Home).
+The app bundles the webosbrew SDL 2.30.12 backport and uses its standardized
+GameController mapping. This keeps the PlayStation face-button positions and
+trigger axes consistent across DualSense, DualShock, Xbox, and other pads.
+
+Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
+haptic audio stream is translated to the controller motors. A Bluetooth
+DualSense additionally receives adaptive-trigger effects, lightbar colour, and
+player-LED state through webOS's Bluetooth HID service.
+
+> Controller feedback requires a TV whose kernel includes LG's
+> `hid-playstation` driver (generally webOS 24 or newer). On older releases such
+> as webOS 5.x, DualSense input still works, but feedback may not reach the pad.
 
 The TV remote is not forwarded to the PS5 as controller input. During streaming it serves only:
 
 | TV Remote Button | Action |
 |---|---|
-| **Up** (hold 0.5 s) | Toggle stats overlay |
-| **Up** (short press) | Forwarded to PS5 as D-pad up |
-| **Back** | Exit the app |
+| **Up** | Toggle stats overlay |
+| **Other navigation buttons** | Reserved by the app during a stream |
+| **Back / Red** | Disconnect and exit the app |
 | **Home** | Exit the app |
+
+In the launcher and Settings screens, the Magic Remote supports d-pad/OK,
+pointer hover and click, and direct number-pad entry for the console IP.
 
 ---
 
@@ -189,8 +205,10 @@ Check `/tmp/chiaki.log` for the `[AUTO]` line confirming which SS4S module was s
 **PS5 won't wake from rest mode**
 Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see above).
 
-**Gamepad buttons intercepted by webOS**
-Check logs for `EVIOCGRAB FAILED`. Disconnect and reconnect the controller after launching the app.
+**Controller input works but rumble/triggers/lightbar do not**
+Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. These features
+need the kernel `hid-playstation` driver found on newer webOS versions; input
+continues to work through the generic HID driver on older TVs.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
@@ -218,7 +236,12 @@ Raw Opus packets from the chiaki-ng audio callback are fed directly to `SS4S_Pla
 
 ### Input pipeline
 
-Gamepad input uses direct Linux evdev reads with `EVIOCGRAB` for exclusive device access, bypassing SDL's joystick subsystem. The evdev reader runs in a dedicated thread and pushes `ChiakiControllerState` updates directly to the chiaki session.
+Gamepad input uses the bundled webosbrew SDL GameController layer. SDL's
+standard A/B/X/Y and trigger axes are translated to `ChiakiControllerState`,
+with controller hotplug handled by the main event loop. Ordinary rumble uses
+SDL/evdev force feedback. DualSense trigger/light state is coalesced and sent
+from a rate-limited worker through the public webOS Bluetooth service, keeping
+process creation off the render loop.
 
 ### webOS version auto-detection
 
@@ -254,7 +277,7 @@ export TOOLCHAIN_DIR=~/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
 ./build-webos.sh ../chiaki-ng 2>&1 | tee build.log
 ```
 
-The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
+The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), installs the pinned SDL-webOS backport, patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
 
 The IPK is output to `build-webos/*.ipk`.
 
@@ -292,7 +315,8 @@ configuration separate from development builds.
 | `config_import.c` / `config_import.h` | chiaki-ng INI settings import |
 | `video.c` / `video.h` | Video callback → SS4S/NDL feed, codec negotiation, stats counters |
 | `audio.c` / `audio.h` | Audio callback → SS4S/NDL Opus feed |
-| `input.c` / `input.h` | Evdev gamepad reader thread with `EVIOCGRAB` |
+| `input.c` / `input.h` | SDL gamepad mapping, hotplug, rumble, and PS5 haptics |
+| `dualsense.c` / `dualsense.h` | Rate-limited DualSense Bluetooth HID feedback |
 | `ui.c` / `ui.h` | Launcher UI, settings screen, loading screen, stats overlay renderer |
 | `stats.c` / `stats.h` | Thread-safe stream statistics and overlay state |
 | `app_log.h` | Shared logging macros |
@@ -319,7 +343,7 @@ configuration separate from development builds.
 | miniupnpc | 2.2.7 | static | UPnP (chiaki dependency) |
 | GF-Complete | master | static | Erasure coding (chiaki dependency) |
 | Jerasure | 2.0 | static | FEC (chiaki dependency) |
-| SDL2 | 2.30.x | dynamic | Window/GL surface, TV remote input |
+| SDL-webOS | 2.30.12 | bundled dynamic | Window/GL surface, controller mapping/rumble, TV remote input |
 | nanopb | 0.4.x | static | Protobuf (chiaki submodule) |
 
 ---
