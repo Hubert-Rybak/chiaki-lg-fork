@@ -259,8 +259,10 @@ Branch pushes, pull requests, and manual workflow runs produce a `Debug` IPK
 under the workflow run's **Artifacts** section. The packaged executable retains
 its debug information so it can be used for testing and diagnostics. CI keeps
 these artifacts for 14 days. Development builds use the distinct application ID
-`org.homebrew.chiaki.fork.dev`, launcher title **Chiaki-lg Fork Dev**, and a
-`DEV`-badged icon, so they can be installed alongside release builds.
+`org.homebrew.chiaki.fork.dev` and a `DEV`-badged icon, so they can be installed
+alongside release builds. Their launcher title and description identify the
+exact source commit, and the short commit hash is included in the IPK filename,
+for example `org.homebrew.chiaki.fork.dev_0.1.1+a1b2c3d4_arm.ipk`.
 
 Pushing a version tag in the exact `vMAJOR.MINOR.PATCH` format (for example,
 `v0.2.0`) builds a stripped `Release` IPK, sets the application version from the

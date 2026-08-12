@@ -45,6 +45,9 @@ jobs:
         id: build-metadata
         shell: bash
         run: |
+          build_commit="$(git rev-parse HEAD)"
+          build_commit_short="${build_commit:0:8}"
+
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "Release tags must use the vMAJOR.MINOR.PATCH format." >&2
@@ -55,19 +58,21 @@ jobs:
             build_type="Release"
             app_id="$RELEASE_APP_ID"
             app_title="Chiaki-lg Fork"
+            app_description="PlayStation Remote Play (PS4 / PS5)"
             artifact_name="chiaki-lg-fork-${GITHUB_REF_NAME}"
           else
             version="$(python3 -c 'import json; print(json.load(open("packaging/appinfo.json", encoding="utf-8"))["version"])')"
             build_type="Debug"
             app_id="$DEV_APP_ID"
-            app_title="Chiaki-lg Fork Dev"
-            artifact_name="chiaki-lg-fork-dev-${GITHUB_SHA:0:8}"
+            app_title="Chiaki Dev $build_commit_short"
+            app_description="Development build $build_commit"
+            artifact_name="chiaki-lg-fork-dev-$build_commit_short"
 
             cp packaging/icon-dev.png packaging/icon.png
             cp packaging/icon-dev.png packaging/largeIcon.png
           fi
 
-          python3 - "$version" "$app_id" "$app_title" <<'PY'
+          python3 - "$version" "$app_id" "$app_title" "$app_description" <<'PY'
           import json
           import pathlib
           import sys
@@ -77,6 +82,7 @@ jobs:
           appinfo["version"] = sys.argv[1]
           appinfo["id"] = sys.argv[2]
           appinfo["title"] = sys.argv[3]
+          appinfo["appDescription"] = sys.argv[4]
           path.write_text(json.dumps(appinfo, indent=2) + "\n", encoding="utf-8")
           PY
 
@@ -85,6 +91,9 @@ jobs:
             echo "PACKAGE_VERSION=$version"
             echo "CHIAKI_APP_ID=$app_id"
             echo "WEBOS_APP_TITLE=$app_title"
+            echo "WEBOS_APP_DESCRIPTION=$app_description"
+            echo "BUILD_COMMIT=$build_commit"
+            echo "BUILD_COMMIT_SHORT=$build_commit_short"
           } >> "$GITHUB_ENV"
           {
             echo "artifact_name=$artifact_name"
@@ -175,6 +184,25 @@ jobs:
         shell: bash
         run: bash ./build-webos.sh "$GITHUB_WORKSPACE/chiaki-ng"
 
+      - name: Add source revision to development IPK filename
+        if: env.WEBOS_BUILD_TYPE == 'Debug'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          ipks=(build-webos/*.ipk)
+          if (( ${#ipks[@]} != 1 )); then
+            echo "Expected exactly one IPK before revision naming, found ${#ipks[@]}." >&2
+            exit 1
+          fi
+
+          source_ipk="${ipks[0]}"
+          stem="${source_ipk%.ipk}"
+          architecture="${stem##*_}"
+          package_and_version="${stem%_*}"
+          revisioned_ipk="${package_and_version}+${BUILD_COMMIT_SHORT}_${architecture}.ipk"
+          mv "$source_ipk" "$revisioned_ipk"
+          echo "Development IPK: $revisioned_ipk"
+
       - name: Save cross-compiled dependency cache
         if: steps.cross-deps-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -213,7 +241,7 @@ jobs:
             exit 1
           fi
 
-          python3 - "$packaged_appinfo" "$CHIAKI_APP_ID" "$WEBOS_APP_TITLE" <<'PY'
+          python3 - "$packaged_appinfo" "$CHIAKI_APP_ID" "$WEBOS_APP_TITLE" "$WEBOS_APP_DESCRIPTION" <<'PY'
           import json
           import pathlib
           import sys
@@ -223,6 +251,10 @@ jobs:
               raise SystemExit(f"Packaged app ID {appinfo.get('id')!r} != {sys.argv[2]!r}")
           if appinfo.get("title") != sys.argv[3]:
               raise SystemExit(f"Packaged title {appinfo.get('title')!r} != {sys.argv[3]!r}")
+          if appinfo.get("appDescription") != sys.argv[4]:
+              raise SystemExit(
+                  f"Packaged description {appinfo.get('appDescription')!r} != {sys.argv[4]!r}"
+              )
           PY
 
           packaged_root="$(dirname "$packaged_appinfo")"
@@ -230,6 +262,11 @@ jobs:
           cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
 
           if [[ "$WEBOS_BUILD_TYPE" == "Debug" ]]; then
+            if [[ "$ipk_name" != *"+$BUILD_COMMIT_SHORT"* ]]; then
+              echo "Development IPK filename '$ipk_name' does not contain commit '$BUILD_COMMIT_SHORT'." >&2
+              exit 1
+            fi
+
             packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
 
             if [[ -z "$packaged_binary" ]]; then
