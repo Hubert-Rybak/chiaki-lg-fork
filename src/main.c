@@ -39,9 +39,9 @@
 #include "ui.h"
 #include "stats.h"
 #include "config_import.h"
+#include "app_id.h"
 
-#define APP_DIR     "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki"
-#define CONFIG_PATH APP_DIR "/config.json"
+#define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -225,7 +225,7 @@ static void setup_ssl_ca_bundle(void)
         "/etc/pki/tls/certs/ca-bundle.crt",
         "/etc/ssl/cert.pem",
         "/usr/share/ca-certificates/ca-certificates.crt",
-        "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/cacert.pem",
+        CHIAKI_APP_DIR "/cacert.pem",
         NULL
     };
     const char *existing = getenv("CURL_CA_BUNDLE");
@@ -524,7 +524,7 @@ static bool psn_decode_account_id(const char *b64, char *out, size_t out_sz)
 static void psn_make_client_duid(char *out, size_t out_sz)
 {
     // Simple hash of our app identity for the random portion
-    const char *seed = "org.homebrew.chiaki-webos-client-001";
+    const char *seed = CHIAKI_APP_ID "-webos-client-001";
     uint8_t hash[16] = {0};
     for (size_t i = 0; seed[i]; i++)
         hash[i % 16] ^= (uint8_t)seed[i];
@@ -958,10 +958,10 @@ int main(int argc, char *argv[])
     { struct rlimit rl = {0, 0}; setrlimit(RLIMIT_CORE, &rl); }
 
     /* ===== REQUIRED WEBOS SS4S ENV SETUP ===== */
-    chdir("/media/developer/apps/usr/palm/applications/org.homebrew.chiaki");
+    chdir(CHIAKI_APP_DIR);
     setenv("SS4S_CONFIG_FILE", "./lib/ss4s_modules.ini", 1);
     // SS4S_MODULE is set after config load — auto-detection picks ndl-webos4 or ndl-webos5.
-    setenv("SS4S_APP_ID",      "org.homebrew.chiaki",    1);
+    setenv("SS4S_APP_ID",      CHIAKI_APP_ID,    1);
     /* ========================================= */
 
     // Open log unconditionally first — once cfg is loaded we'll close it

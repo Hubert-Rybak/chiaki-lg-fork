@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "app_id.h"
 #include "config.h"
 
 #include <SDL2/SDL.h>
@@ -553,7 +554,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         draw_code_block(r, ix, iy, iw,
             "adb push chiaki-ng-Default.ini \\\n"
             " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
+            " applications/" CHIAKI_APP_ID "/", 2);
         iy += 114;
 
 		set_color(r, COL_TEXT_DIM);
@@ -561,7 +562,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
 		
 		draw_code_block(r, ix, iy, iw,
             " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
+            " applications/" CHIAKI_APP_ID "/", 2);
         iy += 114;
 
         set_color(r, COL_TEXT_DIM);

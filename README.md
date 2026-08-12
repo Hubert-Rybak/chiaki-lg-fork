@@ -1,4 +1,4 @@
-# Chiaki-lg
+# Chiaki-lg Fork
 
 A native port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) for LG webOS smart TVs.
 Streams PS4/PS5 Remote Play directly to your LG webOS TV.
@@ -36,7 +36,7 @@ Download the latest `.ipk` from the [Releases](../../releases/latest) page, then
 
 ```bash
 ares-setup-device   # one-time TV setup — TV must be on and in Developer Mode
-ares-install --device myTV chiaki-lg_*.ipk
+ares-install --device myTV org.homebrew.chiaki.fork_*.ipk
 ```
 
 Or use [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) if you prefer a GUI — it can install IPKs directly via drag and drop.
@@ -57,14 +57,14 @@ Chiaki-lg does not handle PS5 registration itself. You must have already registe
 
 ```bash
 adb push chiaki-ng-Default.ini \
-  /media/developer/apps/usr/palm/applications/org.homebrew.chiaki/chiaki-ng-Default.ini
+  /media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/chiaki-ng-Default.ini
 ```
 
 Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop)'s file browser.
 
 ### Step 4 — Launch and connect
 
-1. Launch **Chiaki-lg** on the TV
+1. Launch **Chiaki-lg Fork** on the TV
 2. Enter the local IP address of your PS5 and click **Import Config**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
 3. Open **Settings** and change anything as needed
 4. Select **Connect** — streaming starts immediately
@@ -77,7 +77,7 @@ Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-des
 
 Config file location on the TV:
 ```
-/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/config.json
+/media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/config.json
 ```
 
 Most settings are managed through the in-app Settings screen. You can also edit the file directly via SSH or WebOS Dev Manager.
@@ -194,7 +194,7 @@ Check logs for `EVIOCGRAB FAILED`. Disconnect and reconnect the controller after
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
-`/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/`
+`/media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/`
 
 **App crashes on launch**
 Usually a malformed `config.json`. Check `/tmp/chiaki.log`. Delete the config file to let the app recreate defaults, then repeat the import.
@@ -258,11 +258,15 @@ The IPK is output to `build-webos/*.ipk`.
 Branch pushes, pull requests, and manual workflow runs produce a `Debug` IPK
 under the workflow run's **Artifacts** section. The packaged executable retains
 its debug information so it can be used for testing and diagnostics. CI keeps
-these artifacts for 14 days.
+these artifacts for 14 days. Development builds use the distinct application ID
+`org.homebrew.chiaki.fork.dev`, launcher title **Chiaki-lg Fork Dev**, and a
+`DEV`-badged icon, so they can be installed alongside release builds.
 
 Pushing a version tag in the exact `vMAJOR.MINOR.PATCH` format (for example,
 `v0.2.0`) builds a stripped `Release` IPK, sets the application version from the
 tag, creates the corresponding GitHub Release, and attaches the IPK to it.
+Release builds use the application ID `org.homebrew.chiaki.fork` and keep their
+configuration separate from development builds.
 
 ### Common build errors
 

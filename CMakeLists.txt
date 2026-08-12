@@ -10,6 +10,12 @@ option(WEBOS_BUILD "Cross-compile for webOS TV" OFF)
 
 set(WEBOS_STAGING_DIR "/tmp/webos-staging" CACHE PATH "Cross-compiled deps staging dir")
 set(CHIAKI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../chiaki-ng" CACHE PATH "chiaki-ng source directory")
+set(APP_ID "org.homebrew.chiaki.fork" CACHE STRING "webOS application ID")
+
+if(NOT APP_ID MATCHES "^[a-z0-9][a-z0-9.-]+$")
+    message(FATAL_ERROR "Invalid webOS APP_ID: ${APP_ID}")
+endif()
+message(STATUS "webOS application ID: ${APP_ID}")
 
 # ── CMake module path ─────────────────────────────────────────────────────────
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -134,6 +140,10 @@ add_executable(chiaki-webos
     src/stats.c
 )
 
+target_compile_definitions(chiaki-webos PRIVATE
+    CHIAKI_APP_ID=\"${APP_ID}\"
+)
+
 # Embed rpath so the binary finds ss4s module .so files in lib/ next to itself
 set_target_properties(chiaki-webos PROPERTIES
     INSTALL_RPATH    "$ORIGIN/lib"
@@ -193,7 +203,6 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
 
 # ── IPK packaging via ares-package ────────────────────────────────────────────
 set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
-set(APP_ID "org.homebrew.chiaki")
 
 add_custom_target(ipk
     DEPENDS chiaki-webos

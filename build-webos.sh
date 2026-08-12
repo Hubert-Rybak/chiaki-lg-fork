@@ -9,6 +9,7 @@ CHIAKI_NG_DIR="$(realpath "${1:-$SCRIPT_DIR/../chiaki-ng}")"
 BUILD_DIR="$SCRIPT_DIR/build-webos"
 OUR_STAGING="/tmp/webos-staging"
 WEBOS_BUILD_TYPE="${WEBOS_BUILD_TYPE:-Release}"
+CHIAKI_APP_ID="${CHIAKI_APP_ID:-org.homebrew.chiaki.fork}"
 
 case "$WEBOS_BUILD_TYPE" in
     Debug|Release|RelWithDebInfo|MinSizeRel) ;;
@@ -18,6 +19,11 @@ case "$WEBOS_BUILD_TYPE" in
         exit 1
         ;;
 esac
+
+if [[ ! "$CHIAKI_APP_ID" =~ ^[a-z0-9][a-z0-9.-]+$ ]]; then
+    echo "ERROR: Invalid CHIAKI_APP_ID '$CHIAKI_APP_ID'."
+    exit 1
+fi
 
 # ── Validate toolchain ────────────────────────────────────────────────────────
 if [[ -z "${TOOLCHAIN_DIR:-}" ]]; then
@@ -586,6 +592,7 @@ rm -rf "$BUILD_DIR/CMakeFiles"
 cmake -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_BUILD_TYPE="$WEBOS_BUILD_TYPE" \
+    -DAPP_ID="$CHIAKI_APP_ID" \
     -DWEBOS_BUILD=ON \
     -DWEBOS_STAGING_DIR="$OUR_STAGING" \
     -DCHIAKI_SOURCE_DIR="$CHIAKI_NG_DIR" \

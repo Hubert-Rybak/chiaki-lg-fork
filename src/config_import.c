@@ -3,7 +3,7 @@
  * Workflow (TV-native):
  *   1. User copies chiaki-ng-Default.ini to the app directory on the TV:
  *        adb push chiaki-ng-Default.ini \
- *          /media/developer/apps/usr/palm/applications/org.homebrew.chiaki/
+ *          /media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/
  *   2. On next launch, config_try_import_chiaki_ini() detects the INI and
  *      extracts all registration keys into config.json automatically.
  *   3. The INI file is renamed to *.imported so it is not re-processed
