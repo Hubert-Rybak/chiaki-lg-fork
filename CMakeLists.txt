@@ -24,6 +24,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # ── Platform setup ────────────────────────────────────────────────────────────
 if(WEBOS_BUILD OR CMAKE_CROSSCOMPILING)
     message(STATUS "webOS cross-compile build")
+    # SDL-webOS exposes its compositor/window extensions from SDL_system.h only
+    # when this platform macro is set. The SDK compiler does not define it, but
+    # ss4s needs those declarations for its webOS 5 SMP backend.
+    add_compile_definitions(__WEBOS__=1)
     list(APPEND CMAKE_PREFIX_PATH "${WEBOS_STAGING_DIR}")
     set(PKG_CONFIG_USE_CMAKE_PREFIX_PATH TRUE)
     set(CMAKE_INSTALL_PREFIX "/app" CACHE STRING "" FORCE)
