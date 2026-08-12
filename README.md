@@ -253,6 +253,17 @@ The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniu
 
 The IPK is output to `build-webos/*.ipk`.
 
+### CI artifacts and releases
+
+Branch pushes, pull requests, and manual workflow runs produce a `Debug` IPK
+under the workflow run's **Artifacts** section. The packaged executable retains
+its debug information so it can be used for testing and diagnostics. CI keeps
+these artifacts for 14 days.
+
+Pushing a version tag in the exact `vMAJOR.MINOR.PATCH` format (for example,
+`v0.2.0`) builds a stripped `Release` IPK, sets the application version from the
+tag, creates the corresponding GitHub Release, and attaches the IPK to it.
+
 ### Common build errors
 
 **"cannot find -lchiaki"** or **"Syntax error: ( unexpected"** — You ran `cmake --build` directly. Always use `./build-webos.sh`.
