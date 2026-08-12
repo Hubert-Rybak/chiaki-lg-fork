@@ -3,14 +3,15 @@
  *
  * Call config_try_import_chiaki_ini() early in main(), before config_load().
  * It checks for a chiaki-ng-Default.ini in the app directory and, if found,
- * extracts all registration keys and writes them into config.json.
+ * extracts all registration keys and writes them into config.json. If the
+ * export contains a registered manual host whose MAC matches the selected
+ * console, that host is imported as well.
  *
  * The INI file is renamed to *.imported after a successful import so it will
  * not be re-processed on subsequent launches.
  *
- * The PS5's IP address ("host") is NOT stored in the chiaki-ng INI — the user
- * must still set that field in config.json.  If it was already present in an
- * existing config.json it is automatically preserved.
+ * If no matching manual host is present, an existing host in config.json is
+ * preserved. Otherwise the user must enter the PS5 address in the launcher.
  */
 
 typedef enum {

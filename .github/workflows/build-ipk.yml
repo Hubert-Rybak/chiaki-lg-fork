@@ -132,6 +132,14 @@ jobs:
             python3-pip \
             wget
 
+      - name: Test config import
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Isrc \
+            tests/config_import_test.c \
+            -o "$RUNNER_TEMP/config-import-test"
+          "$RUNNER_TEMP/config-import-test"
+
       - name: Install nanopb generator dependencies
         shell: bash
         run: |

@@ -320,7 +320,7 @@ static char *psn_refresh_access_token(const char *refresh_token)
         token += 3;
         app_log_always("[PSN] Stripped 'v3.' prefix from refresh token\n");
     }
-    app_log_always("[PSN] Refresh token: %.8s... (len=%zu)\n", token, strlen(token));
+    app_log_always("[PSN] Refresh token available (len=%zu)\n", strlen(token));
 
     char *enc_token = curl_easy_escape(curl, token, 0);
     char *enc_scope = curl_easy_escape(curl, PSN_SCOPE, 0);
@@ -354,7 +354,7 @@ static char *psn_refresh_access_token(const char *refresh_token)
     }
     app_log_always("[PSN] Token endpoint HTTP %ld (%zu bytes)\n", http_code, resp.len);
     if (http_code != 200) {
-        app_log_always("[PSN] Token refresh failed: %.512s\n", resp.buf ? resp.buf : "");
+        app_log_always("[PSN] Token refresh failed (HTTP %ld)\n", http_code);
         free(resp.buf);
         return NULL;
     }
@@ -405,8 +405,8 @@ static char *psn_list_devices(const char *access_token)
         free(resp.buf);
         return NULL;
     }
-    app_log_always("[PSN] list_devices HTTP %ld (%zu bytes): %.1024s\n",
-            http_code, resp.len, resp.buf ? resp.buf : "");
+    app_log_always("[PSN] list_devices HTTP %ld (%zu bytes)\n",
+            http_code, resp.len);
 
     if (http_code != 200 || !resp.buf) {
         free(resp.buf);
@@ -469,7 +469,7 @@ static char *psn_list_devices(const char *access_token)
     free(resp.buf);
 
     if (duid)
-        app_log_always("[PSN] Selected device duid=%s\n", duid);
+        app_log_always("[PSN] Selected a Remote Play-enabled device\n");
     else
         app_log_always("[PSN] No suitable device found\n");
     return duid;
@@ -579,8 +579,6 @@ static char *psn_create_session(const char *access_token, const char *account_id
         "}]}]}",
         push_uuid);
 
-    app_log_always("[PSN] Session create body: %s\n", body);
-
     CurlBuf resp = {0};
     curl_easy_setopt(curl, CURLOPT_URL, PSN_SESSION_URL);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -599,8 +597,8 @@ static char *psn_create_session(const char *access_token, const char *account_id
         free(resp.buf);
         return NULL;
     }
-    app_log_always("[PSN] Session create HTTP %ld (%zu bytes): %.1024s\n",
-            http_code, resp.len, resp.buf ? resp.buf : "");
+    app_log_always("[PSN] Session create HTTP %ld (%zu bytes)\n",
+            http_code, resp.len);
 
     if (http_code < 200 || http_code >= 300 || !resp.buf) {
         free(resp.buf);
@@ -636,12 +634,13 @@ static char *psn_create_session(const char *access_token, const char *account_id
     }
     free(resp.buf);
 
-    if (session_id)
-        app_log_always("[PSN] Session created: %s\n", session_id);
+    if (session_id) {
+        app_log_always("[PSN] Session created\n");
         if (out_member_device_uid && *out_member_device_uid)
-            app_log_always("[PSN] Session member deviceUniqueId: %s\n", *out_member_device_uid);
-    else
+            app_log_always("[PSN] Session member device ID received\n");
+    } else {
         app_log_always("[PSN] Could not parse sessionId from response\n");
+    }
     return session_id;
 }
 
@@ -684,8 +683,6 @@ static bool psn_start_session(const char *access_token,
         curl_easy_cleanup(curl);
         return false;
     }
-    app_log_always("[PSN] data1=%s data2=%s\n", data1_b64, data2_b64);
-
     char initial_params[1024];
     snprintf(initial_params, sizeof(initial_params),
             "{\\\"accountId\\\":%s,"
@@ -712,8 +709,6 @@ static bool psn_start_session(const char *access_token,
             "}",
             duid, initial_params);
 
-    app_log_always("[PSN] Session command body: %s\n", body);
-
     CurlBuf resp = {0};
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -729,8 +724,8 @@ static bool psn_start_session(const char *access_token,
         app_log_always("[PSN] Session command curl error: %s\n", curl_easy_strerror(rc));
 
     if (resp.buf && resp.len)
-        app_log_always("[PSN] Session command HTTP %ld (%zu bytes): %s\n",
-                       http_code, resp.len, resp.buf);
+        app_log_always("[PSN] Session command HTTP %ld (%zu bytes)\n",
+                       http_code, resp.len);
     else
         app_log_always("[PSN] Session command HTTP %ld (0 bytes)\n", http_code);
 
@@ -786,7 +781,7 @@ static void do_psn_wakeup(AppConfig *cfg, ChiakiLog *log)
         do_wakeup(cfg, log);
         return;
     }
-    app_log_always("[PSN] Account ID: %s\n", account_id);
+    app_log_always("[PSN] Account ID decoded\n");
 
     // Step 1: Refresh access token
     char *access_token = psn_refresh_access_token(cfg->psn_refresh_token);
@@ -808,7 +803,7 @@ static void do_psn_wakeup(AppConfig *cfg, ChiakiLog *log)
     // Step 3: Generate our client device UID
     char client_duid[128];
     psn_make_client_duid(client_duid, sizeof(client_duid));
-    app_log_always("[PSN] Client duid: %s\n", client_duid);
+    app_log_always("[PSN] Client device ID generated\n");
 
     // Step 4: Create Remote Play session on PSN
     char *session_id = psn_create_session(access_token, account_id, client_duid, NULL);
@@ -937,15 +932,29 @@ static bool should_reconnect(ChiakiQuitReason reason)
         return false;
 
 
-    // PS5 kicked us because another client connected (or session was stolen).
-    // Reconnecting immediately would loop forever; exit cleanly.
-    case CHIAKI_QUIT_REASON_SESSION_REQUEST_UNKNOWN:
-        app_log("[APP] PS5 requested session end (another client may have connected)\n");
-        return false;
-
     // Network / stream errors — worth a retry, unless PS5 went to Rest Mode.
     default:
         return !g_ps5_sleeping;
+    }
+}
+
+// Session-request failures happen before streaming starts. Return to the
+// launcher so the user can correct the host or console state instead of making
+// the process disappear or retrying forever.
+static const char *session_request_failure_message(ChiakiQuitReason reason)
+{
+    switch (reason) {
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_UNKNOWN:
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_CONNECTION_REFUSED:
+        return "Connection failed. Check PS5 IP and console status.";
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE:
+        return "Remote Play is already in use on the PS5.";
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_CRASH:
+        return "The PS5 Remote Play service reported an error.";
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_VERSION_MISMATCH:
+        return "PS5 protocol mismatch. Update the app and retry.";
+    default:
+        return NULL;
     }
 }
 
@@ -1120,14 +1129,32 @@ int main(int argc, char *argv[])
     ChiakiLog chiaki_log;
     chiaki_log_init(&chiaki_log, cfg.log_level, log_cb, NULL);
 
+    // Discovery packets contain the wake credential in their verbose hex dump.
+    // Use a restricted logger for wakeup while retaining the selected level for
+    // the actual streaming session.
+    ChiakiLog wakeup_log;
+    chiaki_log_init(&wakeup_log,
+                    CHIAKI_LOG_WARNING | CHIAKI_LOG_ERROR,
+                    log_cb, NULL);
+
+    char launcher_message[256] = "";
+
     // ── Launcher UI (shown on every launch) ───────────────────────────────
+
+show_launcher:
+    g_session_ended = false;
+    g_quit_reason = CHIAKI_QUIT_REASON_NONE;
+    g_ps5_sleeping = false;
+    g_have_video_frame = false;
 
     app_log("[APP] Showing launcher UI\n");
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
     SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
-    UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log);
+    UIResult ui_result = ui_run_registration(
+        g_renderer, &cfg, config_path, &chiaki_log, launcher_message);
+    launcher_message[0] = '\0';
 
     // Back to transparent so NDL plane shows through during stream
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
@@ -1143,6 +1170,11 @@ int main(int argc, char *argv[])
 
     if (g_should_exit)
         goto cleanup_sdl;
+
+    // The launcher can update logging settings and reload cfg in place.
+    chiaki_log_init(&chiaki_log, cfg.log_level, log_cb, NULL);
+
+    bool return_to_launcher = false;
 
     // ── SS4S init ─────────────────────────────────────────────────────────────
     app_log("[APP] Initialising SS4S (module: %s)\n", cfg.ss4s_module);
@@ -1253,6 +1285,9 @@ int main(int argc, char *argv[])
                              info.regist_key, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode registered_key\n");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "Registration key is invalid. Import config again.");
+        return_to_launcher = true;
         goto cleanup_session_ctx;
     }
     decoded_len = sizeof(info.morning);
@@ -1261,6 +1296,9 @@ int main(int argc, char *argv[])
                              info.morning, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode rp_key\n");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "Remote Play key is invalid. Import config again.");
+        return_to_launcher = true;
         goto cleanup_session_ctx;
     }
     uint8_t account_id_raw[8];
@@ -1270,6 +1308,9 @@ int main(int argc, char *argv[])
                              account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode psn_account_id\n");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "PSN account ID is invalid. Import config again.");
+        return_to_launcher = true;
         goto cleanup_session_ctx;
     }
     memcpy(&info.psn_account_id, account_id_raw, sizeof(info.psn_account_id));
@@ -1314,9 +1355,9 @@ int main(int argc, char *argv[])
         if (cfg.wakeup && attempt == 1)
         {
             if (cfg.psn_refresh_token && cfg.psn_refresh_token[0])
-                do_psn_wakeup(&cfg, &chiaki_log);
+                do_psn_wakeup(&cfg, &wakeup_log);
             else
-                do_wakeup(&cfg, &chiaki_log);
+                do_wakeup(&cfg, &wakeup_log);
 
             Uint32 deadline      = SDL_GetTicks() + (Uint32)cfg.wakeup_delay_ms;
             Uint32 next_wakeup   = SDL_GetTicks() + 5000;
@@ -1342,7 +1383,7 @@ int main(int argc, char *argv[])
 
                 if (SDL_GetTicks() >= next_wakeup)
                 {
-                    do_wakeup(&cfg, &chiaki_log);
+                    do_wakeup(&cfg, &wakeup_log);
                     next_wakeup = SDL_GetTicks() + 5000;
                 }
 
@@ -1412,9 +1453,10 @@ int main(int argc, char *argv[])
         if (err != CHIAKI_ERR_SUCCESS)
         {
             app_log("[APP] chiaki_session_init failed: %s\n", chiaki_error_string(err));
-            // Transient failure — wait and retry
-            SDL_Delay(5000);
-            continue;
+            snprintf(launcher_message, sizeof(launcher_message),
+                     "Could not initialize stream: %s", chiaki_error_string(err));
+            return_to_launcher = true;
+            break;
         }
 
         chiaki_session_set_event_cb(&g_session, session_event_cb, NULL);
@@ -1434,8 +1476,10 @@ int main(int argc, char *argv[])
         {
             app_log("[APP] chiaki_session_start failed: %s\n", chiaki_error_string(err));
             chiaki_session_fini(&g_session);
-            SDL_Delay(5000);
-            continue;
+            snprintf(launcher_message, sizeof(launcher_message),
+                     "Could not start stream: %s", chiaki_error_string(err));
+            return_to_launcher = true;
+            break;
         }
 
         // Wire the evdev reader thread to this session so it can push
@@ -1599,7 +1643,17 @@ int main(int argc, char *argv[])
         chiaki_session_fini(&g_session);
 
         // ── Reconnect decision ────────────────────────────────────────────────
-        if (!g_should_exit && should_reconnect(g_quit_reason))
+        const char *request_failure =
+            session_request_failure_message(g_quit_reason);
+        if (!g_should_exit && request_failure)
+        {
+            snprintf(launcher_message, sizeof(launcher_message),
+                     "%s", request_failure);
+            return_to_launcher = true;
+            app_log_always("[APP] Session request failed — returning to launcher\n");
+            break;
+        }
+        else if (!g_should_exit && should_reconnect(g_quit_reason))
         {
             app_log_always("[APP] Session ended due to network error — retrying in 4s...\n");
             SDL_Delay(4000);
@@ -1618,6 +1672,9 @@ cleanup_session_ctx:
     video_fini(video_ctx);
     SS4S_PlayerClose(ss4s_player);
     SS4S_Quit();
+
+    if (return_to_launcher && !g_should_exit)
+        goto show_launcher;
 
 cleanup_sdl:
     SDL_DestroyRenderer(g_renderer);

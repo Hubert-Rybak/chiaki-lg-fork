@@ -422,7 +422,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
                                 const char *ip, int focus,
                                 const char *msg,
                                 bool has_keys,
-                                bool can_import,
+                                bool has_valid_ip,
                                 bool can_connect,
                                 bool show_keypad)
 {
@@ -568,8 +568,8 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         set_color(r, COL_TEXT_DIM);
         draw_text(r, ix, iy, "Then on this screen:", 2); iy += 22;
         set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "1. Enter your PS5 IP address", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "2. Press  Import Config", 2);
+        draw_text(r, ix + 14, iy, "Press  Import Config", 2); iy += 20;
+        draw_text(r, ix + 14, iy, "The matching PS5 IP is imported too", 2);
 
     } else if (step == 2) {
         set_color(r, COL_ACCENT);
@@ -666,7 +666,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         int btn_h = 80;
         int btn_w = (rw - 20) / 2;
 
-        draw_button(r, rx,              ry, btn_w, btn_h, "Import Config", focus == 13, can_import);
+        draw_button(r, rx,              ry, btn_w, btn_h, "Import Config", focus == 13, true);
         draw_button(r, rx + btn_w + 20, ry, btn_w, btn_h, "Connect",       focus == 14, can_connect);
         ry += btn_h + 16;
 
@@ -675,14 +675,9 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         ry += 60 + 36;
 
         /* Contextual guidance */
-        if (step == 1 && !can_import) {
-            set_color(r, COL_TEXT_FAINT);
-            draw_text(r, rx, ry, "Enter a PS5 IP address above,", 2); ry += 20;
-            draw_text(r, rx, ry, "then press Import Config to load", 2); ry += 20;
-            draw_text(r, rx, ry, "your registration keys.", 2);
-        } else if (step == 1 && can_import) {
+        if (step == 1) {
             set_color(r, COL_TEXT_DIM);
-            draw_text(r, rx, ry, "IP looks good. If you have copied", 2); ry += 20;
+            draw_text(r, rx, ry, "If you have copied", 2); ry += 20;
             draw_text(r, rx, ry, "chiaki-ng-Default.ini to the TV,", 2); ry += 20;
             draw_text(r, rx, ry, "press  Import Config  to continue.", 2);
         } else if (step == 2) {
@@ -717,7 +712,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
 
     pill_x += draw_status_pill(r, pill_x, pill_y, "Keys: Ready", has_keys);
     pill_x += draw_status_pill(r, pill_x, pill_y, ip && ip[0] ? ip : "IP: Not Set",
-                                can_import);
+                                has_valid_ip);
     /* Note: can_connect also requires keys, so it's only true if both are set */
     if (can_connect)
         draw_status_pill(r, pill_x, pill_y, "Ready", true);
@@ -1360,7 +1355,8 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path, ChiakiLog *log)
+                             const char *config_path, ChiakiLog *log,
+                             const char *initial_message)
 {
     (void)log;
 
@@ -1376,6 +1372,8 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     int  focus   = 0;
     bool editing = false;
     char msg[256] = {0};
+    if (initial_message && initial_message[0])
+        snprintf(msg, sizeof(msg), "%s", initial_message);
 
     /* Start with Connect focused if already ready */
     if (ui_valid_ipv4(ip) && ui_has_keys(cfg))
@@ -1394,9 +1392,9 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
             (cfg && cfg->rp_key_b64) ? "OK" : "NO",
             (cfg && cfg->psn_refresh_token) ? "OK" : "none");
 
-        bool has_keys   = ui_has_keys(cfg);
-        bool can_import = ui_valid_ipv4(ip);
-        bool can_connect= ui_valid_ipv4(ip) && has_keys;
+        bool has_keys    = ui_has_keys(cfg);
+        bool has_valid_ip = ui_valid_ipv4(ip);
+        bool can_connect = has_valid_ip && has_keys;
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -1496,11 +1494,11 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         editing = true; focus = 1;
                     } else if (!editing && focus == 13) {
                         /* Import Config */
-                        if (!ui_valid_ipv4(ip)) {
-                            snprintf(msg, sizeof(msg), "Enter a valid PS5 IP address first.");
+                        if (ip[0] && !ui_valid_ipv4(ip)) {
+                            snprintf(msg, sizeof(msg), "Clear the IP field or enter a valid address.");
                             focus = 0; continue;
                         }
-                        if (!ui_write_host(config_path, ip)) {
+                        if (ip[0] && !ui_write_host(config_path, ip)) {
                             snprintf(msg, sizeof(msg), "Failed to write host to config.json");
                             continue;
                         }
@@ -1518,13 +1516,19 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                             snprintf(msg, sizeof(msg), "Import failed: could not write config.json.");
                             break;
                         case CI_SUCCESS:
-                        case CI_SUCCESS_NEEDS_HOST:
-                            snprintf(msg, sizeof(msg), "Import OK.  Press Connect.");
+                            snprintf(msg, sizeof(msg), "Import OK. PS5 IP loaded. Press Connect.");
                             ui_reload_cfg(cfg, config_path);
                             if (cfg && cfg->host && cfg->host[0])
                                 snprintf(ip, sizeof(ip), "%s", cfg->host);
                             if (ui_has_keys(cfg) && ui_valid_ipv4(ip))
                                 focus = 14;
+                            break;
+                        case CI_SUCCESS_NEEDS_HOST:
+                            snprintf(msg, sizeof(msg), "Keys imported. Enter the PS5 IP address.");
+                            ui_reload_cfg(cfg, config_path);
+                            if (cfg && cfg->host && cfg->host[0])
+                                snprintf(ip, sizeof(ip), "%s", cfg->host);
+                            focus = 0;
                             break;
                         default:
                             snprintf(msg, sizeof(msg), "Import complete.");
@@ -1588,7 +1592,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
         }
 
         render_setup_screen(renderer, status, ip, focus, msg,
-                             has_keys, can_import, can_connect, editing);
+                             has_keys, has_valid_ip, can_connect, editing);
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
     }

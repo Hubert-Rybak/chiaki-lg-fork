@@ -17,7 +17,7 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
 - **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`)
-- **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to auto-import registration credentials (PS5 IP still required)
+- **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to import registration credentials and the matching manual-host IP
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
 - **Sleep-on-exit** — sends PS5 to rest mode when you quit the app
@@ -65,11 +65,11 @@ Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-des
 ### Step 4 — Launch and connect
 
 1. Launch **Chiaki-lg Fork** on the TV
-2. Enter the local IP address of your PS5 and click **Import Config**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
+2. Click **Import Config**. The matching local PS5 address is imported when it is present in the export; otherwise, enter it manually. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
 3. Open **Settings** and change anything as needed
 4. Select **Connect** — streaming starts immediately
 
-> The `.ini` file does not contain your PS5's IP address. You must enter it manually before importing.
+> If the export contains several consoles, verify the imported address before connecting. The app currently imports the first registered console and its matching manual host.
 
 ---
 
@@ -198,6 +198,11 @@ Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
 
 **App crashes on launch**
 Usually a malformed `config.json`. Check `/tmp/chiaki.log`. Delete the config file to let the app recreate defaults, then repeat the import.
+
+**App returns to the launcher after “Starting stream”**
+The PS5 rejected the initial session request or could not be reached. Verify the
+local PS5 address and ensure Remote Play is enabled. The launcher displays the
+connection error instead of terminating the app.
 
 ---
 

@@ -5,11 +5,13 @@
  *        adb push chiaki-ng-Default.ini \
  *          /media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/
  *   2. On next launch, config_try_import_chiaki_ini() detects the INI and
- *      extracts all registration keys into config.json automatically.
+ *      extracts all registration keys and the matching manual-host address
+ *      into config.json automatically.
  *   3. The INI file is renamed to *.imported so it is not re-processed
  *      automatically on next launch.
- *   4. If "host" was already set in config.json it is preserved.
- *      If not, the app shows the setup screen prompting for the PS5 IP only.
+ *   4. A manual host whose registered MAC matches the selected console is
+ *      preferred over an existing host. If no matching host is exported, the
+ *      existing config value is preserved.
  *   5. If the user presses Import Config again, the *.imported file is
  *      used as a fallback — re-importing works without a fresh copy.
  *      Only CI_FILE_NOT_FOUND is returned if neither file exists.
@@ -27,6 +29,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <arpa/inet.h>
 
 /* ── Minimal self-contained base64 encoder ─────────────────────────────────── */
 
@@ -125,6 +128,10 @@ typedef struct {
     int  target;              /* PS5 if >= 1000000 */
     char server_mac[512];
 
+    char manual_host[256];
+    char manual_registered_mac[512];
+    bool manual_registered;
+
     char psn_account_id[256]; /* already base64, may be quoted */
     char psn_refresh_token[2048]; /* OAuth2 refresh token (may be quoted) */
     char codec[32];           /* "h265" / "h264" */
@@ -132,10 +139,25 @@ typedef struct {
     bool sleep_on_exit;
 } IniData;
 
+static void copy_ini_string(char *dst, size_t dst_size, const char *raw_val)
+{
+    if (!dst || dst_size == 0) return;
+
+    while (*raw_val == ' ' || *raw_val == '\t') raw_val++;
+    snprintf(dst, dst_size, "%s", raw_val);
+
+    size_t len = strlen(dst);
+    if (len >= 2 && dst[0] == '"' && dst[len - 1] == '"') {
+        memmove(dst, dst + 1, len - 2);
+        dst[len - 2] = '\0';
+    }
+}
+
 /* Strip leading/trailing whitespace in-place */
 static char *str_trim(char *s)
 {
     while (*s == ' ' || *s == '\t') s++;
+    if (!*s) return s;
     char *end = s + strlen(s) - 1;
     while (end > s && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n'))
         *end-- = '\0';
@@ -164,15 +186,23 @@ static void process_line(IniData *d, const char *section,
         else if (!strcmp(field, "server_mac"))
             snprintf(d->server_mac, sizeof(d->server_mac), "%s", raw_val);
     }
+    else if (strcmp(section, "manual_hosts") == 0) {
+        /* Match the first manual host to the first registered console. */
+        if (key[0] != '1' || key[1] != '\\') return;
+        const char *field = key + 2;
+
+        if (!strcmp(field, "host"))
+            copy_ini_string(d->manual_host, sizeof(d->manual_host), raw_val);
+        else if (!strcmp(field, "registered"))
+            d->manual_registered = !strcmp(raw_val, "true") || atoi(raw_val) != 0;
+        else if (!strcmp(field, "registered_mac"))
+            snprintf(d->manual_registered_mac,
+                     sizeof(d->manual_registered_mac), "%s", raw_val);
+    }
     else if (strcmp(section, "settings") == 0) {
         /* Strip surrounding quotes from string values */
         char val[1024];
-        snprintf(val, sizeof(val), "%s", raw_val);
-        if (val[0] == '"') {
-            memmove(val, val + 1, strlen(val));
-            size_t len = strlen(val);
-            if (len > 0 && val[len - 1] == '"') val[len - 1] = '\0';
-        }
+        copy_ini_string(val, sizeof(val), raw_val);
 
         if (!strcmp(key, "psn_account_id"))
             snprintf(d->psn_account_id, sizeof(d->psn_account_id), "%s", val);
@@ -365,7 +395,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         return CI_PARSE_ERROR;
     }
     b64_encode(raw, (size_t)rk_len, registered_key_b64);
-    app_log_always("[IMPORT] registered_key: %d bytes → %s\n", rk_len, registered_key_b64);
+    app_log_always("[IMPORT] registered_key: imported %d bytes\n", rk_len);
 
     int rpk_len = parse_qt_bytearray(d.rp_key, raw, sizeof(raw));
     if (rpk_len < 0) {
@@ -373,7 +403,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         return CI_PARSE_ERROR;
     }
     b64_encode(raw, (size_t)rpk_len, rp_key_b64);
-    app_log_always("[IMPORT] rp_key: %d bytes → %s\n", rpk_len, rp_key_b64);
+    app_log_always("[IMPORT] rp_key: imported %d bytes\n", rpk_len);
 
     if (d.server_mac[0]) {
         int mac_len = parse_qt_bytearray(d.server_mac, raw, sizeof(raw));
@@ -381,7 +411,28 @@ ChiakiImportResult config_try_import_chiaki_ini(
             snprintf(ps5_mac, sizeof(ps5_mac),
                      "%02x:%02x:%02x:%02x:%02x:%02x",
                      raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
-            app_log_always("[IMPORT] ps5_mac: %s\n", ps5_mac);
+            app_log_always("[IMPORT] PS5 MAC imported\n");
+        }
+    }
+
+    /* Use the exported address only when it belongs to the selected console. */
+    char imported_host[256] = "";
+    if (d.manual_registered && d.manual_host[0] &&
+        d.server_mac[0] && d.manual_registered_mac[0])
+    {
+        uint8_t registered_mac[16];
+        uint8_t manual_mac[16];
+        int registered_mac_len = parse_qt_bytearray(
+            d.server_mac, registered_mac, sizeof(registered_mac));
+        int manual_mac_len = parse_qt_bytearray(
+            d.manual_registered_mac, manual_mac, sizeof(manual_mac));
+        struct in_addr address;
+
+        if (registered_mac_len == 6 && manual_mac_len == registered_mac_len &&
+            memcmp(registered_mac, manual_mac, (size_t)registered_mac_len) == 0 &&
+            inet_pton(AF_INET, d.manual_host, &address) == 1)
+        {
+            snprintf(imported_host, sizeof(imported_host), "%s", d.manual_host);
         }
     }
 
@@ -394,10 +445,17 @@ ChiakiImportResult config_try_import_chiaki_ini(
     extract_existing_host(config_path, host, sizeof(host), &vid_w, &vid_h, &vid_fps,
                           existing_refresh, sizeof(existing_refresh));
 
-    if (host[0])
-        app_log_always("[IMPORT] Preserving existing host: %s\n", host);
-    else
+    if (imported_host[0]) {
+        if (host[0] && strcmp(host, imported_host) != 0)
+            app_log_always("[IMPORT] Replacing configured host with the matched desktop host\n");
+        else
+            app_log_always("[IMPORT] Using matched desktop host\n");
+        snprintf(host, sizeof(host), "%s", imported_host);
+    } else if (host[0]) {
+        app_log_always("[IMPORT] No matching desktop host; preserving configured host\n");
+    } else {
         app_log_always("[IMPORT] No existing host — will need to be set manually\n");
+    }
 
     /* ── Write config.json ────────────────────────────────────────────────── */
     char esc_host[256], esc_psn[256], esc_rk[512], esc_rpk[512], esc_mac[64], esc_rt[4096];
@@ -457,11 +515,11 @@ ChiakiImportResult config_try_import_chiaki_ini(
     );
     fclose(out);
 
-    app_log_always("[IMPORT] config.json written: host=%s ps5=%d rp_key_type=%d "
-                   "codec=%s bitrate=%d sleep_on_exit=%d mac=%s\n",
-                   host[0] ? host : "(not set)", ps5,
+    app_log_always("[IMPORT] config.json written: host_set=%d ps5=%d rp_key_type=%d "
+                   "codec=%s bitrate=%d sleep_on_exit=%d mac_set=%d\n",
+                   host[0] != '\0', ps5,
                    d.rp_key_type, codec, bitrate, d.sleep_on_exit,
-                   ps5_mac[0] ? ps5_mac : "(none)");
+                   ps5_mac[0] != '\0');
 
     /* ── Rename INI so we don't re-import on next auto-launch ────────────── */
     if (from_original) {
