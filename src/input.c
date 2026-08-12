@@ -26,10 +26,10 @@
 #define BTN_EAST     0x131   /* BTN_B  — Circle / B */
 #endif
 #ifndef BTN_NORTH
-#define BTN_NORTH    0x133   /* BTN_X  — Square / X     (confusingly, kernel maps Xbox-X to NORTH) */
+#define BTN_NORTH    0x133   /* BTN_X alias — Triangle / Y (north/top) */
 #endif
 #ifndef BTN_WEST
-#define BTN_WEST     0x134   /* BTN_Y  — Triangle / Y   (confusingly, kernel maps Xbox-Y to WEST)  */
+#define BTN_WEST     0x134   /* BTN_Y alias — Square / X (west/left)  */
 #endif
 #ifndef BTN_DPAD_UP
 #define BTN_DPAD_UP    0x220
@@ -39,6 +39,12 @@
 #endif
 #ifndef BTN_RECORD
 #define BTN_RECORD     0x167   /* Xbox Series X|S capture/share button */
+#endif
+#ifndef ABS_GAS
+#define ABS_GAS        0x09
+#endif
+#ifndef ABS_BRAKE
+#define ABS_BRAKE      0x0a
 #endif
 
 #include <chiaki/controller.h>
@@ -61,6 +67,7 @@
 
 // ── Per-device state ───────────────────────────────────────────────────────────
 #define MAX_GAMEPADS 4
+#define AXIS_UNMAPPED (-1)
 
 // ── Touchpad chord: Select+Start → Touchpad (for Xbox controllers) ──────────
 // When Select or Start is pressed alone, we defer emitting SHARE/OPTIONS for
@@ -83,6 +90,10 @@ typedef struct {
     char path[64];
     int  abs_min[ABS_CNT];
     int  abs_max[ABS_CNT];
+    int  right_x_axis;
+    int  right_y_axis;
+    int  l2_axis;
+    int  r2_axis;
     ChordState chord;
 } GamepadDev;
 
@@ -107,6 +118,90 @@ static int16_t normalize_axis(int val, int min, int max)
     if (scaled >  32767) scaled =  32767;
     if (scaled < -32768) scaled = -32768;
     return (int16_t)scaled;
+}
+
+// ── Normalize an evdev trigger value → uint8 ──────────────────────────────
+static uint8_t normalize_trigger(int val, int min, int max)
+{
+    if (max <= min) return 0;
+    if (val < min) val = min;
+    if (val > max) val = max;
+    return (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
+}
+
+static const char *axis_name(int axis)
+{
+    switch (axis) {
+    case ABS_RX:    return "ABS_RX";
+    case ABS_RY:    return "ABS_RY";
+    case ABS_Z:     return "ABS_Z";
+    case ABS_RZ:    return "ABS_RZ";
+    case ABS_GAS:   return "ABS_GAS";
+    case ABS_BRAKE: return "ABS_BRAKE";
+    case ABS_HAT2X: return "ABS_HAT2X";
+    case ABS_HAT2Y: return "ABS_HAT2Y";
+    default:        return "unmapped";
+    }
+}
+
+static bool abs_axis_supported(const uint8_t *absbits, int axis)
+{
+    return axis >= 0 && axis < ABS_CNT && EVDEV_BITS_TEST(absbits, axis);
+}
+
+// ── Select a per-device axis layout from its advertised capabilities ───────
+static void configure_axis_mapping(GamepadDev *pad)
+{
+    uint8_t absbits[(ABS_CNT + 7) / 8];
+    memset(absbits, 0, sizeof(absbits));
+
+    pad->right_x_axis = AXIS_UNMAPPED;
+    pad->right_y_axis = AXIS_UNMAPPED;
+    pad->l2_axis      = AXIS_UNMAPPED;
+    pad->r2_axis      = AXIS_UNMAPPED;
+
+    if (ioctl(pad->fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) < 0) {
+        app_log("[INPUT] Failed to read axis capabilities for %s: %s\n",
+                pad->path, strerror(errno));
+        return;
+    }
+
+    // Standard Linux/Sony layout uses RX/RY for the right stick. The webOS
+    // Xbox HID driver omits those axes and reports the right stick as Z/RZ.
+    if (abs_axis_supported(absbits, ABS_RX) &&
+        abs_axis_supported(absbits, ABS_RY)) {
+        pad->right_x_axis = ABS_RX;
+        pad->right_y_axis = ABS_RY;
+    } else if (abs_axis_supported(absbits, ABS_Z) &&
+               abs_axis_supported(absbits, ABS_RZ)) {
+        pad->right_x_axis = ABS_Z;
+        pad->right_y_axis = ABS_RZ;
+    }
+
+    // Trigger conventions, in priority order:
+    //   Linux gamepad spec: HAT2Y/HAT2X
+    //   Android/Bluetooth:  BRAKE/GAS
+    //   Sony/older pads:    Z/RZ (unless reserved for the right stick above)
+    if (abs_axis_supported(absbits, ABS_HAT2Y))
+        pad->l2_axis = ABS_HAT2Y;
+    else if (abs_axis_supported(absbits, ABS_BRAKE))
+        pad->l2_axis = ABS_BRAKE;
+    else if (abs_axis_supported(absbits, ABS_Z) &&
+             pad->right_x_axis != ABS_Z && pad->right_y_axis != ABS_Z)
+        pad->l2_axis = ABS_Z;
+
+    if (abs_axis_supported(absbits, ABS_HAT2X))
+        pad->r2_axis = ABS_HAT2X;
+    else if (abs_axis_supported(absbits, ABS_GAS))
+        pad->r2_axis = ABS_GAS;
+    else if (abs_axis_supported(absbits, ABS_RZ) &&
+             pad->right_x_axis != ABS_RZ && pad->right_y_axis != ABS_RZ)
+        pad->r2_axis = ABS_RZ;
+
+    app_log("[INPUT] Axis map for %s: right=%s/%s, L2=%s, R2=%s\n",
+            pad->path,
+            axis_name(pad->right_x_axis), axis_name(pad->right_y_axis),
+            axis_name(pad->l2_axis), axis_name(pad->r2_axis));
 }
 
 // ── Monotonic clock helper ─────────────────────────────────────────────────────
@@ -218,11 +313,18 @@ static bool apply_key_event(ChiakiControllerState *st, GamepadDev *pad,
     switch (code) {
     case BTN_SOUTH:      btn = CHIAKI_CONTROLLER_BUTTON_CROSS;    break;
     case BTN_EAST:       btn = CHIAKI_CONTROLLER_BUTTON_MOON;     break;
-    case BTN_NORTH:      btn = CHIAKI_CONTROLLER_BUTTON_BOX;      break;
-    case BTN_WEST:       btn = CHIAKI_CONTROLLER_BUTTON_PYRAMID;  break;
+    case BTN_NORTH:      btn = CHIAKI_CONTROLLER_BUTTON_PYRAMID;  break;
+    case BTN_WEST:       btn = CHIAKI_CONTROLLER_BUTTON_BOX;      break;
     case BTN_TL:         btn = CHIAKI_CONTROLLER_BUTTON_L1;       break;
     case BTN_TR:         btn = CHIAKI_CONTROLLER_BUTTON_R1;       break;
-    case BTN_TL2: /* fall-through */ case BTN_TR2: return false;
+    case BTN_TL2:
+        if (pad->l2_axis != AXIS_UNMAPPED) return false;
+        st->l2_state = pressed ? 255 : 0;
+        return true;
+    case BTN_TR2:
+        if (pad->r2_axis != AXIS_UNMAPPED) return false;
+        st->r2_state = pressed ? 255 : 0;
+        return true;
     case BTN_MODE:       btn = CHIAKI_CONTROLLER_BUTTON_PS;       break;
     case BTN_THUMBL:     btn = CHIAKI_CONTROLLER_BUTTON_L3;       break;
     case BTN_THUMBR:     btn = CHIAKI_CONTROLLER_BUTTON_R3;       break;
@@ -242,36 +344,31 @@ static bool apply_key_event(ChiakiControllerState *st, GamepadDev *pad,
 static void apply_abs_event(ChiakiControllerState *st, GamepadDev *pad,
                              uint16_t code, int32_t val)
 {
+    if (code >= ABS_CNT) return;
+
     int min = pad->abs_min[code];
     int max = pad->abs_max[code];
 
-    // Xbox Wireless Controller on webOS HID driver maps axes differently from
-    // standard xpad. Confirmed via diagnostic logging:
-    //   ABS_X  (0) = left stick X,  range 0-65535
-    //   ABS_Y  (1) = left stick Y,  range 0-65535
-    //   ABS_Z  (2) = right stick X, range 0-65535  (NOT L2!)
-    //   ABS_RZ (5) = right stick Y, range 0-65535  (NOT R2!)
-    //   ABS_GAS   (9)  = L2 trigger, range 0-1023
-    //   ABS_BRAKE (10) = R2 trigger, range 0-1023
-    //   ABS_RX (3) and ABS_RY (4) are not used by this driver.
+    if ((int)code == pad->right_x_axis) {
+        st->right_x = normalize_axis(val, min, max);
+        return;
+    }
+    if ((int)code == pad->right_y_axis) {
+        st->right_y = normalize_axis(val, min, max);
+        return;
+    }
+    if ((int)code == pad->l2_axis) {
+        st->l2_state = normalize_trigger(val, min, max);
+        return;
+    }
+    if ((int)code == pad->r2_axis) {
+        st->r2_state = normalize_trigger(val, min, max);
+        return;
+    }
+
     switch (code) {
     case ABS_X:    st->left_x  = normalize_axis(val, min, max); break;
     case ABS_Y:    st->left_y  = normalize_axis(val, min, max); break;
-    // Right stick — standard mapping (DualSense / DualShock via hid-sony)
-    case ABS_RX:   st->right_x = normalize_axis(val, min, max); break;
-    case ABS_RY:   st->right_y = normalize_axis(val, min, max); break;
-    // Right stick — Xbox Wireless via webOS HID driver uses ABS_Z/ABS_RZ for sticks
-    case ABS_Z:    st->right_x = normalize_axis(val, min, max); break;
-    case ABS_RZ:   st->right_y = normalize_axis(val, min, max); break;
-    // Triggers — Xbox Wireless via webOS HID uses ABS_GAS/ABS_BRAKE (range 0-1023)
-    case 9:  /* ABS_GAS   — R2 (swapped on webOS HID driver) */
-        if (max > min)
-            st->r2_state = (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-        break;
-    case 10: /* ABS_BRAKE — L2 (swapped on webOS HID driver) */
-        if (max > min)
-            st->l2_state = (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-        break;
     case ABS_HAT0X:
         st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT |
                          CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT);
@@ -392,7 +489,7 @@ static bool is_gamepad(int fd, const char *name)
     if (!EVDEV_BITS_TEST(keybits, BTN_SOUTH))
         return false;
 
-    uint8_t absbits[(ABS_MAX + 7) / 8];
+    uint8_t absbits[(ABS_CNT + 7) / 8];
     memset(absbits, 0, sizeof(absbits));
     ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
 
@@ -411,6 +508,10 @@ static void open_gamepads(InputContext *ctx)
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         ctx->pads[i].fd = -1;
         ctx->pads[i].path[0] = '\0';
+        ctx->pads[i].right_x_axis = AXIS_UNMAPPED;
+        ctx->pads[i].right_y_axis = AXIS_UNMAPPED;
+        ctx->pads[i].l2_axis = AXIS_UNMAPPED;
+        ctx->pads[i].r2_axis = AXIS_UNMAPPED;
         memset(&ctx->pads[i].chord, 0, sizeof(ChordState));
     }
 
@@ -466,6 +567,7 @@ static void open_gamepads(InputContext *ctx)
 
         snprintf(pad->path, sizeof(pad->path), "%s", path);
         pad->fd = fd;
+        configure_axis_mapping(pad);
         ctx->num_pads++;
         app_log("[INPUT] Opened gamepad: \"%s\" @ %s\n", devname, path);
     }
