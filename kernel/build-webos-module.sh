@@ -22,6 +22,7 @@ if [[ ! -d "$KERNEL_DIR" ]]; then
 fi
 
 make -C "$KERNEL_DIR" \
+    HOSTCFLAGS=-fcommon \
     ARCH=arm64 \
     CROSS_COMPILE=aarch64-linux-gnu- \
     defconfig
@@ -33,14 +34,17 @@ make -C "$KERNEL_DIR" \
     --disable MODVERSIONS \
     --disable MODULE_SIG
 make -C "$KERNEL_DIR" \
+    HOSTCFLAGS=-fcommon \
     ARCH=arm64 \
     CROSS_COMPILE=aarch64-linux-gnu- \
     olddefconfig
 make -C "$KERNEL_DIR" \
+    HOSTCFLAGS=-fcommon \
     ARCH=arm64 \
     CROSS_COMPILE=aarch64-linux-gnu- \
     modules_prepare
 make -C "$KERNEL_DIR" \
+    HOSTCFLAGS=-fcommon \
     ARCH=arm64 \
     CROSS_COMPILE=aarch64-linux-gnu- \
     KBUILD_MODPOST_WARN=1 \
