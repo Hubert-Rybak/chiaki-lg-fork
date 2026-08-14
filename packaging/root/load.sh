@@ -41,7 +41,17 @@ for device in /sys/bus/hid/devices/*; do
             id=${device##*/}
             echo "$id" > /sys/bus/hid/drivers/hid-generic/unbind
             if echo "$id" > /sys/bus/hid/drivers/playstation/bind; then
-                echo "Rebound $id to playstation."
+                rebound_driver=$(readlink "$device/driver" 2>/dev/null || true)
+                case "$rebound_driver" in
+                    */playstation)
+                        echo "Rebound $id to playstation."
+                        ;;
+                    *)
+                        echo "playstation did not claim $id; restoring hid-generic."
+                        echo "$id" > /sys/bus/hid/drivers/hid-generic/bind || true
+                        exit 5
+                        ;;
+                esac
             else
                 echo "playstation bind failed for $id; restoring hid-generic."
                 echo "$id" > /sys/bus/hid/drivers/hid-generic/bind || true

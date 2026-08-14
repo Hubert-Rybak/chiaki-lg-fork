@@ -22,7 +22,15 @@ fi
 arch=$(uname -m)
 release=$(uname -r)
 case "$arch:$release" in
-    aarch64:4.4.84*) module_rel=modules/aarch64/4.4.84/hid-playstation.ko ;;
+    aarch64:4.4.84*)
+        compatible=$(tr '\000' '\n' < /proc/device-tree/compatible 2>/dev/null || true)
+        if printf '%s\n' "$compatible" | grep -qx 'lge,lg1212'; then
+            module_rel=modules/aarch64/4.4.84/lg1212/hid-playstation.ko
+        else
+            echo "No ABI-matched compatibility module for $arch kernel $release (${compatible:-unknown platform}); leaving the system unchanged."
+            exit 0
+        fi
+        ;;
     *)
         echo "No compatibility module for $arch kernel $release; leaving the system unchanged."
         exit 0

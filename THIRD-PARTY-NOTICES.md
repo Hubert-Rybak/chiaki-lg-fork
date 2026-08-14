@@ -11,6 +11,13 @@ Copyright (C) 2020 Sony Interactive Entertainment
 
 Linux kernel source: <https://github.com/torvalds/linux>
 
+The webOS 4.4 module is compiled against LG's GPL-2.0 `linux-4.4-lg115x`
+source and `lg1k` configuration from the `webOS 5.0 JO 2.0` source release for
+OLED55GXRLA. The build verifies every enclosing LG source archive by SHA-256
+before using it.
+
+LG product source catalog: <https://opensource.lge.com/product>
+
 ## punktfunk-webos
 
 The webOS DualSense Bluetooth feedback implementation is adapted from

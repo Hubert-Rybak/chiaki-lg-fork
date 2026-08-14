@@ -158,17 +158,19 @@ DualSense additionally receives adaptive-trigger effects, lightbar colour, and
 player-LED state through webOS's Bluetooth HID service.
 
 Newer TVs include LG's `hid-playstation` driver and work without setup. The IPK
-also bundles a minimal compatibility driver for rooted ARM64 TVs using LG's
-4.4.84 kernel (webOS 5/6 generation). On first launch, the app asks Homebrew
-Channel's elevated service to install it under
+also bundles a minimal compatibility driver for rooted ARM64 LG1212/O20 TVs
+using LG's 4.4.84 kernel (webOS 5/6 generation). It is built against LG's
+published `lg1k` kernel source and configuration so its in-kernel structure ABI
+matches these TVs. On first launch, the app asks Homebrew Channel's elevated
+service to install it under
 `/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
 `90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
 unchanged.
 
-The compatibility module is selected by CPU architecture, kernel release, and
-module vermagic. It preserves the descriptor-derived input mapping while adding
-native `EV_FF` rumble and the DualSense initialization needed by Bluetooth
-trigger/light reports. Installation diagnostics are written to
+The compatibility module is selected by CPU architecture, kernel release,
+device-tree platform, and module vermagic. It preserves the descriptor-derived
+input mapping while adding native `EV_FF` rumble and the DualSense initialization
+needed by Bluetooth trigger/light reports. Installation diagnostics are written to
 `/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
 `/tmp/chiaki-hid-playstation.log`.
 
@@ -223,9 +225,10 @@ Check `/tmp/chiaki.log` for the `[AUTO]` line confirming which SS4S module was s
 Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see above).
 
 **Controller input works but rumble/triggers/lightbar do not**
-Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. These features
-need the kernel `hid-playstation` driver found on newer webOS versions; input
-continues to work through the generic HID driver on older TVs.
+Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. Newer TVs provide
+the kernel `hid-playstation` driver directly. Rooted LG1212/O20 TVs using LG's
+4.4.84 kernel can install the bundled compatibility module automatically; other
+older platforms continue to work as input-only through `hid-generic`.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:

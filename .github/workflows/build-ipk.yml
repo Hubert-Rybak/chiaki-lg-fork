@@ -183,7 +183,7 @@ jobs:
         run: |
           bash kernel/build-webos-module.sh \
             "$RUNNER_TEMP/linux-4.4-module" \
-            packaging/root/modules/aarch64/4.4.84
+            packaging/root/modules/aarch64/4.4.84/lg1212
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -315,13 +315,13 @@ jobs:
           cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
           test -s "$packaged_root/lib/libSDL2-2.0.so.0"
           test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
-          test -s "$packaged_root/root/modules/aarch64/4.4.84/hid-playstation.ko"
+          test -s "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko"
           test -s "$packaged_root/root/install.sh"
           test -s "$packaged_root/root/load.sh"
           test -s "$packaged_root/root/boot-hook.sh"
           test -s "$packaged_root/root/uninstall.sh"
           aarch64-linux-gnu-readelf -h \
-            "$packaged_root/root/modules/aarch64/4.4.84/hid-playstation.ko" \
+            "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko" \
             | grep -F 'Machine:' \
             | grep -F 'AArch64'
 
