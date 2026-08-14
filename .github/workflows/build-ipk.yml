@@ -134,13 +134,20 @@ jobs:
             build-essential \
             cmake \
             git \
+            gcc-aarch64-linux-gnu \
+            bc \
+            bison \
+            flex \
+            kmod \
             libtool \
+            libssl-dev \
             make \
             ninja-build \
             pkg-config \
             protobuf-compiler \
             python3-pip \
-            wget
+            wget \
+            xz-utils
 
       - name: Test config import
         shell: bash
@@ -158,6 +165,25 @@ jobs:
             -pthread \
             -o "$RUNNER_TEMP/dualsense-test"
           "$RUNNER_TEMP/dualsense-test"
+
+      - name: Test root bootstrap and scripts
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            -c src/root_feedback.c \
+            -o "$RUNNER_TEMP/root-feedback.o"
+          sh -n \
+            packaging/root/install.sh \
+            packaging/root/load.sh \
+            packaging/root/boot-hook.sh \
+            packaging/root/uninstall.sh
+
+      - name: Build webOS 4.4 DualSense kernel module
+        shell: bash
+        run: |
+          bash kernel/build-webos-module.sh \
+            "$RUNNER_TEMP/linux-4.4-module" \
+            packaging/root/modules/aarch64/4.4.84
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -289,6 +315,15 @@ jobs:
           cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
           test -s "$packaged_root/lib/libSDL2-2.0.so.0"
           test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
+          test -s "$packaged_root/root/modules/aarch64/4.4.84/hid-playstation.ko"
+          test -s "$packaged_root/root/install.sh"
+          test -s "$packaged_root/root/load.sh"
+          test -s "$packaged_root/root/boot-hook.sh"
+          test -s "$packaged_root/root/uninstall.sh"
+          aarch64-linux-gnu-readelf -h \
+            "$packaged_root/root/modules/aarch64/4.4.84/hid-playstation.ko" \
+            | grep -F 'Machine:' \
+            | grep -F 'AArch64'
 
           packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
           if [[ -z "$packaged_binary" ]]; then

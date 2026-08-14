@@ -1,5 +1,16 @@
 # Third-party notices
 
+## Linux hid-playstation
+
+The bundled webOS 4.4 compatibility module is derived from the DualSense output
+protocol and driver lifecycle in Linux `hid-playstation`, first released in the
+Linux 5.12 series. The module source is distributed under GPL-2.0 in
+`kernel/hid-playstation-compat/`.
+
+Copyright (C) 2020 Sony Interactive Entertainment
+
+Linux kernel source: <https://github.com/torvalds/linux>
+
 ## punktfunk-webos
 
 The webOS DualSense Bluetooth feedback implementation is adapted from

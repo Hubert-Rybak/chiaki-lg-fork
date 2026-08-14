@@ -142,6 +142,7 @@ add_executable(chiaki-webos
     src/audio.c
     src/input.c
     src/dualsense.c
+    src/root_feedback.c
     src/ui.c
     src/stats.c
 )
@@ -200,6 +201,10 @@ install(FILES
     packaging/largeIcon.png
     THIRD-PARTY-NOTICES.md
     DESTINATION .
+)
+install(DIRECTORY packaging/root/
+    DESTINATION root
+    USE_SOURCE_PERMISSIONS
 )
 if(SDL2_BUNDLED_LIBRARY)
     if(NOT EXISTS "${SDL2_BUNDLED_LIBRARY}")

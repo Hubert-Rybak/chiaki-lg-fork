@@ -40,6 +40,7 @@
 #include "stats.h"
 #include "config_import.h"
 #include "app_id.h"
+#include "root_feedback.h"
 #include "webos_keys.h"
 
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
@@ -1006,6 +1007,10 @@ int main(int argc, char *argv[])
         config_path = argv[1];
 
     app_log("[APP] config_path = %s\n", config_path);
+
+    /* Rooted TVs can install the bundled, strictly compatibility-gated
+     * DualSense driver through Homebrew Channel's elevated service. */
+    root_feedback_bootstrap_async();
 
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);

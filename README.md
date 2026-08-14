@@ -157,9 +157,26 @@ haptic audio stream is translated to the controller motors. A Bluetooth
 DualSense additionally receives adaptive-trigger effects, lightbar colour, and
 player-LED state through webOS's Bluetooth HID service.
 
-> Controller feedback requires a TV whose kernel includes LG's
-> `hid-playstation` driver (generally webOS 24 or newer). On older releases such
-> as webOS 5.x, DualSense input still works, but feedback may not reach the pad.
+Newer TVs include LG's `hid-playstation` driver and work without setup. The IPK
+also bundles a minimal compatibility driver for rooted ARM64 TVs using LG's
+4.4.84 kernel (webOS 5/6 generation). On first launch, the app asks Homebrew
+Channel's elevated service to install it under
+`/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
+`90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
+unchanged.
+
+The compatibility module is selected by CPU architecture, kernel release, and
+module vermagic. It preserves the descriptor-derived input mapping while adding
+native `EV_FF` rumble and the DualSense initialization needed by Bluetooth
+trigger/light reports. Installation diagnostics are written to
+`/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
+`/tmp/chiaki-hid-playstation.log`.
+
+To remove the root component and return connected pads to `hid-generic`:
+
+```sh
+/var/lib/webosbrew/chiaki-dualsense/uninstall.sh
+```
 
 The TV remote is not forwarded to the PS5 as controller input. During streaming it serves only:
 
