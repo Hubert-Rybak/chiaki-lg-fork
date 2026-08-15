@@ -37,8 +37,10 @@
 #define DS_VALID_COMPATIBLE_VIBRATION          0x01
 #define DS_VALID_HAPTICS_SELECT                0x02
 #define DS_VALID_LIGHTBAR_SETUP                0x02
+#define DS_VALID_COMPATIBLE_VIBRATION2         0x04
 #define DS_LIGHTBAR_SETUP_LIGHT_OUT            0x02
 #define DS_OUTPUT_CRC32_SEED                   0xa2
+#define DS_FEATURE_VERSION(major, minor)        (((major) << 8) | (minor))
 
 /* Offsets within the 47-byte common portion of USB/Bluetooth output reports. */
 #define DS_COMMON_VALID_FLAG0                  0
@@ -55,6 +57,7 @@ struct dualsense_compat {
 	u8 output_seq;
 	u8 motor_left;
 	u8 motor_right;
+	bool use_vibration_v2;
 	bool opened;
 };
 
@@ -112,8 +115,13 @@ static int dualsense_send_report(struct dualsense_compat *ds, bool reset_lightba
 		right = ds->motor_right;
 		spin_unlock_irqrestore(&ds->lock, flags);
 
-		common[DS_COMMON_VALID_FLAG0] =
-			DS_VALID_COMPATIBLE_VIBRATION | DS_VALID_HAPTICS_SELECT;
+		common[DS_COMMON_VALID_FLAG0] = DS_VALID_HAPTICS_SELECT;
+		if (ds->use_vibration_v2)
+			common[DS_COMMON_VALID_FLAG2] |=
+				DS_VALID_COMPATIBLE_VIBRATION2;
+		else
+			common[DS_COMMON_VALID_FLAG0] |=
+				DS_VALID_COMPATIBLE_VIBRATION;
 		common[DS_COMMON_MOTOR_RIGHT] = right;
 		common[DS_COMMON_MOTOR_LEFT] = left;
 	}
@@ -184,6 +192,16 @@ static void dualsense_prime_features(struct dualsense_compat *ds)
 		if (ret < 0)
 			hid_dbg(ds->hdev, "feature 0x%02x unavailable: %d\n",
 				features[i].id, ret);
+		else if (features[i].id == DS_FEATURE_REPORT_FIRMWARE_INFO &&
+			 ret > 45 && ds->hdev->product == DUALSENSE_PRODUCT_ID) {
+			u16 update_version = buf[44] | (buf[45] << 8);
+
+			ds->use_vibration_v2 =
+				update_version >= DS_FEATURE_VERSION(2, 21);
+			hid_dbg(ds->hdev, "feature version %u.%u, vibration v2=%d\n",
+				 update_version >> 8, update_version & 0xff,
+				 ds->use_vibration_v2);
+		}
 	}
 
 	kfree(buf);
@@ -214,6 +232,9 @@ static int dualsense_probe(struct hid_device *hdev,
 		return -ENOMEM;
 
 	ds->hdev = hdev;
+	/* Current DualSense and all Edge firmware use Sony's vibration-v2 flag.
+	 * A successfully retrieved old firmware report can opt back into v1. */
+	ds->use_vibration_v2 = true;
 	spin_lock_init(&ds->lock);
 	INIT_WORK(&ds->output_worker, dualsense_output_worker);
 	ds->output_report = devm_kzalloc(&hdev->dev,

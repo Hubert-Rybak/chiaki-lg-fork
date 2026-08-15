@@ -75,11 +75,34 @@ static void test_release_and_payload(void)
     assert(payload[strlen(payload) - 1] == '}');
 }
 
+static void test_old_webos_bluetooth_address(void)
+{
+    static const char block[] =
+        "I: Bus=0005 Vendor=054c Product=0ce6 Version=0100\n"
+        "N: Name=\"DualSense Wireless Controller\"\n"
+        "P: Phys=D4:2F:4B:9E:09:57\n"
+        "U: Uniq=57:09:9E:4B:2F:D4\n";
+    char address[32];
+    assert(dualsense_extract_bluetooth_address(block, address,
+                                               sizeof(address)));
+    assert(strcmp(address, "d4:2f:4b:9e:09:57") == 0);
+
+    static const char fallback[] =
+        "N: Name=\"DualSense Wireless Controller\"\n"
+        "P: Phys=usb-0000:00:14.0-1/input0\n"
+        "U: Uniq=AA:BB:CC:DD:EE:FF\n";
+    assert(dualsense_extract_bluetooth_address(fallback, address,
+                                               sizeof(address)));
+    assert(strcmp(address, "aa:bb:cc:dd:ee:ff") == 0);
+    assert(!dualsense_extract_bluetooth_address(block, address, 17));
+}
+
 int main(void)
 {
     test_crc();
     test_report();
     test_release_and_payload();
+    test_old_webos_bluetooth_address();
     puts("DualSense protocol tests passed");
     return 0;
 }

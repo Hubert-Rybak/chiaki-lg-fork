@@ -1008,8 +1008,8 @@ int main(int argc, char *argv[])
 
     app_log("[APP] config_path = %s\n", config_path);
 
-    /* Rooted TVs can install the bundled, strictly compatibility-gated
-     * DualSense driver through Homebrew Channel's elevated service. */
+    /* Rooted TVs can activate the bundled, strictly compatibility-gated
+     * DualSense driver and old-webOS Bluetooth correction through Homebrew. */
     root_feedback_bootstrap_async();
 
     signal(SIGINT,  sig_handler);

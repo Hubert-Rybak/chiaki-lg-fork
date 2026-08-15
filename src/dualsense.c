@@ -31,6 +31,7 @@
 #define LUNA_SEND_PUB "/usr/bin/luna-send-pub"
 #define SEND_DATA_URI \
     "luna://com.webos.service.bluetooth2/hid/internal/sendData"
+#define ROOT_PATCH_MARKER "/tmp/chiaki-bluetooth-output-patched"
 
 #define COMMON_OFFSET             3
 #define FLAG0_RIGHT_TRIGGER       0x04
@@ -285,20 +286,49 @@ typedef struct {
     size_t address_size;
 } AddressSearch;
 
+bool dualsense_extract_bluetooth_address(const char *block,
+                                         char *address, size_t address_size)
+{
+    if (!block || !address || address_size == 0 || !block_is_dualsense(block))
+        return false;
+    char candidate[64];
+
+    /*
+     * LG's old UHID bridge exposes the DualSense address byte-reversed in
+     * U: Uniq, but preserves the canonical address in P: Phys. Prefer Phys
+     * whenever it is a MAC address and retain Uniq for newer implementations.
+     */
+    const char *fields[] = { "P: Phys=", "U: Uniq=" };
+    for (size_t field = 0; field < sizeof(fields) / sizeof(fields[0]); ++field) {
+        if (!block_value(block, fields[field], candidate, sizeof(candidate)) ||
+            strlen(candidate) != 17)
+            continue;
+
+        bool valid = true;
+        for (size_t i = 0; i < 17; ++i) {
+            if ((i + 1) % 3 == 0) {
+                if (candidate[i] != ':')
+                    valid = false;
+            } else if (!isxdigit((unsigned char)candidate[i])) {
+                valid = false;
+            }
+        }
+        if (!valid || address_size < 18)
+            continue;
+
+        for (char *p = candidate; *p; ++p)
+            *p = (char)tolower((unsigned char)*p);
+        strcpy(address, candidate);
+        return true;
+    }
+    return false;
+}
+
 static bool address_visitor(const char *block, void *user)
 {
-    if (!block_is_dualsense(block))
-        return false;
     AddressSearch *search = user;
-    char unique[64];
-    if (!block_value(block, "U: Uniq=", unique, sizeof(unique)))
-        return false;
-    for (char *p = unique; *p; ++p)
-        *p = (char)tolower((unsigned char)*p);
-    if (strlen(unique) + 1 > search->address_size)
-        return false;
-    strcpy(search->address, unique);
-    return true;
+    return dualsense_extract_bluetooth_address(block, search->address,
+                                               search->address_size);
 }
 
 bool dualsense_find_bluetooth_address(char *address, size_t address_size)
@@ -342,6 +372,23 @@ static bool driver_visitor(const char *block, void *user)
 bool dualsense_hid_playstation_bound(void)
 {
     return visit_input_blocks(driver_visitor, NULL);
+}
+
+static bool dualsense_root_transport_patched(void)
+{
+    FILE *marker = fopen(ROOT_PATCH_MARKER, "r");
+    if (!marker)
+        return false;
+
+    long pid = 0;
+    bool valid = fscanf(marker, "%ld", &pid) == 1 && pid > 0;
+    fclose(marker);
+    if (!valid)
+        return false;
+
+    char maps[64];
+    int n = snprintf(maps, sizeof(maps), "/proc/%ld/maps", pid);
+    return n > 0 && (size_t)n < sizeof(maps) && access(maps, R_OK) == 0;
 }
 
 static bool luna_send_report(const char *address,
@@ -483,9 +530,10 @@ DualSenseFeedback *dualsense_feedback_new(void)
         app_log("[DUALSENSE] No Bluetooth DualSense address found\n");
         return NULL;
     }
-    if (!dualsense_hid_playstation_bound()) {
-        app_log_always("[DUALSENSE] Controller uses hid-generic, not hid-playstation; "
-                       "adaptive triggers/lightbar require webOS 24 or newer\n");
+    if (!dualsense_hid_playstation_bound() &&
+        !dualsense_root_transport_patched()) {
+        app_log_always("[DUALSENSE] No native driver or rooted Bluetooth "
+                       "transport correction; advanced feedback disabled\n");
         return NULL;
     }
 

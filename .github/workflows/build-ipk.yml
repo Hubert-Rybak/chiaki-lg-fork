@@ -172,6 +172,18 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
             -c src/root_feedback.c \
             -o "$RUNNER_TEMP/root-feedback.o"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/bt_patch_test.c src/bt_patch.c \
+            -o "$RUNNER_TEMP/bt-patch-test"
+          "$RUNNER_TEMP/bt-patch-test"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tools/chiaki_bt_patch.c src/bt_patch.c \
+            -o "$RUNNER_TEMP/chiaki-bt-patch"
+          set +e
+          "$RUNNER_TEMP/chiaki-bt-patch" 0 >/dev/null 2>&1
+          invalid_pid_status=$?
+          set -e
+          test "$invalid_pid_status" -eq 2
           sh -n \
             packaging/root/install.sh \
             packaging/root/load.sh \
@@ -320,6 +332,11 @@ jobs:
           test -s "$packaged_root/root/load.sh"
           test -s "$packaged_root/root/boot-hook.sh"
           test -s "$packaged_root/root/uninstall.sh"
+          test -x "$packaged_root/root/chiaki-bt-patch"
+          "$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" -h \
+            "$packaged_root/root/chiaki-bt-patch" \
+            | grep -F 'Machine:' \
+            | grep -F 'ARM'
           aarch64-linux-gnu-readelf -h \
             "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko" \
             | grep -F 'Machine:' \

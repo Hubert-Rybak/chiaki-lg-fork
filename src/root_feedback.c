@@ -73,10 +73,6 @@ static void *bootstrap_worker(void *unused)
 
 void root_feedback_bootstrap_async(void)
 {
-    if (access("/sys/bus/hid/drivers/playstation", F_OK) == 0) {
-        app_log("[ROOT] playstation HID driver already available\n");
-        return;
-    }
     if (access(LUNA_SEND_PUB, X_OK) != 0)
         return;
 
@@ -88,4 +84,3 @@ void root_feedback_bootstrap_async(void)
     }
     pthread_detach(thread);
 }
-

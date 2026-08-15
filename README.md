@@ -167,10 +167,20 @@ service to install it under
 `90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
 unchanged.
 
+These older releases also contain an LG Bluetooth-stack bug that labels HID
+output as a feature report. The root component includes a small runtime helper
+that scans the running Bluetooth daemon for one exact instruction signature and
+changes only the report-type immediate from `3` to `2`. The correction is made
+in process memory: the firmware library on disk is never replaced or edited,
+ambiguous/unknown builds fail closed, app launch reapplies it after daemon
+restarts, and uninstall restores the live byte when applicable.
+
 The compatibility module is selected by CPU architecture, kernel release,
 device-tree platform, and module vermagic. It preserves the descriptor-derived
 input mapping while adding native `EV_FF` rumble and the DualSense initialization
-needed by Bluetooth trigger/light reports. Installation diagnostics are written to
+needed by Bluetooth trigger/light reports. The rumble mode follows Sony's
+firmware feature version when available and defaults to the current vibration-v2
+protocol. Installation diagnostics are written to
 `/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
 `/tmp/chiaki-hid-playstation.log`.
 

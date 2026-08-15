@@ -30,6 +30,8 @@ bool dualsense_build_payload(const char *address,
                              const uint8_t report[DUALSENSE_REPORT_LEN],
                              char *payload, size_t payload_size);
 
+bool dualsense_extract_bluetooth_address(const char *input_block,
+                                         char *address, size_t address_size);
 bool dualsense_find_bluetooth_address(char *address, size_t address_size);
 bool dualsense_hid_playstation_bound(void);
 
@@ -44,4 +46,3 @@ void dualsense_feedback_set_trigger_effects(DualSenseFeedback *feedback,
 void dualsense_feedback_set_intensity(DualSenseFeedback *feedback, uint8_t intensity);
 void dualsense_feedback_release(DualSenseFeedback *feedback);
 void dualsense_feedback_free(DualSenseFeedback *feedback);
-

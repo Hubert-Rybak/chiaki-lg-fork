@@ -147,6 +147,12 @@ add_executable(chiaki-webos
     src/stats.c
 )
 
+add_executable(chiaki-bt-patch
+    tools/chiaki_bt_patch.c
+    src/bt_patch.c
+)
+target_include_directories(chiaki-bt-patch PRIVATE src/)
+
 target_compile_definitions(chiaki-webos PRIVATE
     CHIAKI_APP_ID=\"${APP_ID}\"
 )
@@ -195,6 +201,7 @@ target_link_options(chiaki-webos PRIVATE
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS chiaki-webos RUNTIME DESTINATION .)
+install(TARGETS chiaki-bt-patch RUNTIME DESTINATION root)
 install(FILES
     packaging/appinfo.json
     packaging/icon.png
@@ -226,7 +233,7 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
 set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
 
 add_custom_target(ipk
-    DEPENDS chiaki-webos
+    DEPENDS chiaki-webos chiaki-bt-patch
 
     COMMAND ${CMAKE_COMMAND} -E make_directory "${IPK_STAGING_DIR}"
     COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${IPK_STAGING_DIR}"
