@@ -30,6 +30,36 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
 ---
 
+## How this fork differs from the original Chiaki-lg build
+
+This fork keeps the original Chiaki-lg hardware-accelerated streaming pipeline,
+but improves controller handling, connection recovery, TV navigation, and
+package management. The comparison below refers to the original
+`org.homebrew.chiaki` version from which this repository was forked.
+
+| Area | Original Chiaki-lg | This fork |
+|---|---|---|
+| PlayStation controls | Direct evdev mapping; button and axis aliases can vary by TV kernel | Bundled SDL GameController mappings with corrected Square/Triangle positions, analog L2/R2, sticks, and hotplug |
+| Controller feedback | Controller input only | Rumble for supported pads, PS5 haptic-to-rumble conversion, and DualSense adaptive triggers, lightbar, and player LEDs |
+| Older webOS DualSense support | No feedback path for TVs without LG's `hid-playstation` driver | Optional rooted compatibility driver and a signature-checked, memory-only correction for LG's Bluetooth output-report bug on supported LG1212/O20 TVs |
+| PS5 connection failures | An initial session failure can terminate the app | Failed initial connections return to the launcher with an error so settings or the address can be corrected |
+| Config import | Imports registration credentials; the console IP must be entered separately | Also imports the manual-host address matching the selected registered console when available |
+| Magic Remote | Basic remote handling | D-pad navigation, pointer hover/click, number-pad PIN/IP entry, and Red as Back/disconnect |
+| Installation identity | `org.homebrew.chiaki` | Release ID `org.homebrew.chiaki.fork` and development ID `org.homebrew.chiaki.fork.dev`, allowing all variants to coexist |
+| Development builds | No source revision in the installed identity | `DEV`-badged icon plus the exact commit hash in the launcher title, description, artifact name, and IPK filename |
+
+The rooted compatibility path is deliberately conservative. It does not edit
+LG firmware files, rejects unknown Bluetooth-library signatures and unsupported
+kernels, and can be removed with the bundled uninstaller. Root is not required
+for normal streaming, controller input, Magic Remote support, or TVs that
+already provide a suitable PlayStation driver.
+
+The core limitations remain the same: console registration is performed with
+desktop chiaki-ng, and actual codec/resolution support still depends on the
+TV's webOS NDL implementation.
+
+---
+
 ## Quick start
 
 ### Step 1 — Download and install
