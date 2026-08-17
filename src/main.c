@@ -191,6 +191,60 @@ static void sig_handler(int sig)
 
 // ── Wakeup ────────────────────────────────────────────────────────────────────
 
+static bool host_port_ready(const char *host, uint16_t port, int timeout_ms)
+{
+    if (!host || !host[0] || timeout_ms < 0)
+        return false;
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &address.sin_addr) != 1)
+        return false;
+
+    int probe = socket(AF_INET, SOCK_STREAM, 0);
+    if (probe < 0)
+        return false;
+
+    int flags = fcntl(probe, F_GETFL, 0);
+    if (flags < 0 || fcntl(probe, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(probe);
+        return false;
+    }
+
+    int rc = connect(probe, (struct sockaddr *)&address, sizeof(address));
+    if (rc == 0) {
+        close(probe);
+        return true;
+    }
+    if (errno != EINPROGRESS) {
+        close(probe);
+        return false;
+    }
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(probe, &write_fds);
+    struct timeval timeout = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    rc = select(probe + 1, NULL, &write_fds, NULL, &timeout);
+    if (rc <= 0) {
+        close(probe);
+        return false;
+    }
+
+    int socket_error = 0;
+    socklen_t error_len = sizeof(socket_error);
+    bool ready = getsockopt(probe, SOL_SOCKET, SO_ERROR,
+                            &socket_error, &error_len) == 0 &&
+                 socket_error == 0;
+    close(probe);
+    return ready;
+}
+
 static void do_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
     uint8_t account_id[8];
@@ -1372,106 +1426,63 @@ show_launcher:
         SDL_RenderPresent(g_renderer);
 
         // ── Wakeup ───────────────────────────────────────────────────────────
-        // Send wakeup on the first attempt only.  Poll until the PS5 becomes
-        // reachable (TCP connect to port 9295) rather than using a fixed delay
-        // so we connect the moment it is ready whether it was asleep or awake.
-        // Resend the wakeup packet every 5s in case the first UDP was lost.
+        // Send wakeup on the first attempt only. Check port 9295 first so an
+        // already-awake console does not receive a competing PSN cloud Remote
+        // Play command immediately before the local Chiaki session. If it is
+        // asleep, resend the local wake packet every 5s until it is reachable.
         if (cfg.wakeup && attempt == 1)
         {
-            if (cfg.psn_refresh_token && cfg.psn_refresh_token[0])
-                do_psn_wakeup(&cfg, &wakeup_log);
-            else
-                do_wakeup(&cfg, &wakeup_log);
-
-            Uint32 deadline      = SDL_GetTicks() + (Uint32)cfg.wakeup_delay_ms;
-            Uint32 next_wakeup   = SDL_GetTicks() + 5000;
-            app_log_always("[WAKEUP] Waiting up to %dms for PS5 to become ready...\n",
-                    cfg.wakeup_delay_ms);
-            bool ps5_ready = false;
-            SDL_Event ev;
-
-            struct sockaddr_in sa;
-            memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET;
-            sa.sin_port   = htons(9295);
-            inet_pton(AF_INET, cfg.host, &sa.sin_addr);
-
-            while (!g_should_exit && SDL_GetTicks() < deadline)
-            {
-                while (SDL_PollEvent(&ev))
-                    if (ev.type == SDL_QUIT) { g_should_exit = true; break; }
-                if (g_should_exit) break;
-
-                ui_render_loading(g_renderer, "Waking console");
-                SDL_RenderPresent(g_renderer);
-
-                if (SDL_GetTicks() >= next_wakeup)
-                {
-                    do_wakeup(&cfg, &wakeup_log);
-                    next_wakeup = SDL_GetTicks() + 5000;
-                }
-
-                int probe = socket(AF_INET, SOCK_STREAM, 0);
-                if (probe < 0)
-                {
-                    app_log("[WAKEUP] probe: socket() failed: %s\n", strerror(errno));
-                    SDL_Delay(500);
-                    continue;
-                }
-                int flags = fcntl(probe, F_GETFL, 0);
-                fcntl(probe, F_SETFL, flags | O_NONBLOCK);
-
-                int rc = connect(probe, (struct sockaddr *)&sa, sizeof(sa));
-                if (rc == 0)
-                {
-                    close(probe);
-                    app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
-                    ps5_ready = true;
-                    break;
-                }
-                else if (errno == EINPROGRESS)
-                {
-                    fd_set wfds;
-                    FD_ZERO(&wfds);
-                    FD_SET(probe, &wfds);
-                    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-                    int sel = select(probe + 1, NULL, &wfds, NULL, &tv);
-                    if (sel > 0)
-                    {
-                        int err2 = 0;
-                        socklen_t len = sizeof(err2);
-                        getsockopt(probe, SOL_SOCKET, SO_ERROR, &err2, &len);
-                        if (err2 == 0)
-                        {
-                            close(probe);
-                            app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
-                            ps5_ready = true;
-                            break;
-                        }
-                        app_log("[WAKEUP] probe: %s (errno=%d)\n",
-                                err2 == ECONNREFUSED ? "ECONNREFUSED — PS5 NIC up, port 9295 closed"
-                                                     : strerror(err2), err2);
-                    }
-                    else if (sel == 0)
-                    {
-                        app_log("[WAKEUP] probe: select timeout — PS5 not yet reachable\n");
-                    }
-                    else
-                    {
-                        app_log("[WAKEUP] probe: select error: %s\n", strerror(errno));
-                    }
-                }
+            bool ps5_ready = host_port_ready(cfg.host, 9295, 250);
+            if (ps5_ready) {
+                app_log_always("[WAKEUP] PS5 is already ready; skipping wakeup\n");
+            } else {
+                if (cfg.psn_refresh_token && cfg.psn_refresh_token[0])
+                    do_psn_wakeup(&cfg, &wakeup_log);
                 else
+                    do_wakeup(&cfg, &wakeup_log);
+
+                Uint32 deadline = SDL_GetTicks() + (Uint32)cfg.wakeup_delay_ms;
+                Uint32 next_wakeup = SDL_GetTicks() + 5000;
+                app_log_always("[WAKEUP] Waiting up to %dms for PS5 to become ready...\n",
+                        cfg.wakeup_delay_ms);
+                SDL_Event ev;
+
+                while (!g_should_exit && SDL_GetTicks() < deadline)
                 {
-                    app_log("[WAKEUP] probe: connect immediate error: %s (errno=%d)\n",
-                            strerror(errno), errno);
+                    while (SDL_PollEvent(&ev))
+                        if (ev.type == SDL_QUIT) { g_should_exit = true; break; }
+                    if (g_should_exit) break;
+
+                    ui_render_loading(g_renderer, "Waking console");
+                    SDL_RenderPresent(g_renderer);
+
+                    if (host_port_ready(cfg.host, 9295, 1000)) {
+                        app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
+                        ps5_ready = true;
+                        break;
+                    }
+
+                    if (SDL_GetTicks() >= next_wakeup)
+                    {
+                        do_wakeup(&cfg, &wakeup_log);
+                        next_wakeup = SDL_GetTicks() + 5000;
+                    }
+                    SDL_Delay(250);
                 }
-                close(probe);
-                SDL_Delay(500);
             }
-            if (!ps5_ready && !g_should_exit)
-                app_log_always("[WAKEUP] Deadline reached — attempting connection anyway\n");
+
+            if (!ps5_ready && !g_should_exit) {
+                app_log_always("[WAKEUP] PS5 did not become reachable; returning to launcher\n");
+                snprintf(launcher_message, sizeof(launcher_message),
+                         "PS5 did not wake at %s. Turn it on or check Rest Mode network settings.",
+                         cfg.host);
+                return_to_launcher = true;
+                break;
+            }
         }
+
+        if (g_should_exit)
+            break;
 
         ChiakiErrorCode err = chiaki_session_init(&g_session, &info, &chiaki_log);
         if (err != CHIAKI_ERR_SUCCESS)

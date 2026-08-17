@@ -2,7 +2,7 @@
 attempt=0
 while [ "$attempt" -lt 10 ]; do
     set +e
-    /var/lib/webosbrew/chiaki-dualsense/load.sh --rebind
+    /var/lib/webosbrew/chiaki-dualsense/load.sh
     status=$?
     set -e
     case "$status" in

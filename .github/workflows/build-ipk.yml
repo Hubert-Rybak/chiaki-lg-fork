@@ -189,6 +189,10 @@ jobs:
             packaging/root/load.sh \
             packaging/root/boot-hook.sh \
             packaging/root/uninstall.sh
+          ! grep -F 'load.sh" --rebind' packaging/root/install.sh
+          ! grep -F 'load.sh --rebind' packaging/root/boot-hook.sh
+          grep -F '"$STATE_DIR/load.sh"' packaging/root/install.sh
+          grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
 
       - name: Build webOS 4.4 DualSense kernel module
         shell: bash

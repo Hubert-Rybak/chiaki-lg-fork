@@ -77,13 +77,14 @@ else
 fi
 
 set +e
-"$STATE_DIR/load.sh" --rebind
+"$STATE_DIR/load.sh"
 load_status=$?
 set -e
 case "$load_status" in
     0|75)
         # PID 75 means the Bluetooth daemon was not up yet. The boot hook and
         # the next app launch retry without touching the library on disk.
+        echo "Connected controllers are not rebound automatically; reconnect once to use playstation."
         cp "$BUNDLE_ROOT/root/boot-hook.sh" "$HOOK_PATH"
         chmod 0755 "$HOOK_PATH"
         ;;

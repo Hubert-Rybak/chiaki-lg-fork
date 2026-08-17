@@ -64,6 +64,16 @@ static void assert_host(const char *config_path, const char *expected_host)
     free(generated);
 }
 
+static void assert_safe_wakeup_delay(const char *config_path)
+{
+    char *generated = read_text(config_path);
+    if (!strstr(generated, "\"wakeup_delay_ms\": 60000")) {
+        free(generated);
+        fail("import did not use the safe wakeup delay");
+    }
+    free(generated);
+}
+
 static void run_case(const char *dir, const char *name,
                      const char *existing_host,
                      const char *manual_mac,
@@ -108,6 +118,7 @@ static void run_case(const char *dir, const char *name,
     if (config_try_import_chiaki_ini(ini_path, config_path) != expected_result)
         fail("import returned the wrong result");
     assert_host(config_path, expected_host);
+    assert_safe_wakeup_delay(config_path);
 
     if (verify_reimport) {
         /* The TV keeps the export as .imported after the first successful run. */
@@ -115,6 +126,7 @@ static void run_case(const char *dir, const char *name,
         if (config_try_import_chiaki_ini(ini_path, config_path) != expected_result)
             fail(".imported fallback returned the wrong result");
         assert_host(config_path, expected_host);
+        assert_safe_wakeup_delay(config_path);
     }
 
     unlink(imported_path);

@@ -195,7 +195,9 @@ matches these TVs. On first launch, the app asks Homebrew Channel's elevated
 service to install it under
 `/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
 `90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
-unchanged.
+unchanged. Installation never rebinds a controller that is already in use;
+after the first installation, disconnect and reconnect the pad once so the new
+driver can claim it.
 
 These older releases also contain an LG Bluetooth-stack bug that labels HID
 output as a feature report. The root component includes a small runtime helper
@@ -254,6 +256,10 @@ Set `"log_level": "info"` or `"debug"` in config.json for more detail. Critical 
 
 **Stream doesn't start / connection timeout**
 Ensure Remote Play is enabled on your PS5 (Settings → System → Remote Play → Enable Remote Play). Verify the IP in `config.json` and that the TV and PS5 are on the same subnet.
+When wakeup is enabled, the app first checks whether the console is already
+ready and skips PSN/UDP wakeup in that case. Imported configurations wait up to
+60 seconds. If the console remains unreachable, the app returns to the launcher
+with a specific wakeup error instead of starting a session that cannot succeed.
 
 **Black screen with audio**
 Likely a codec or NDL issue. Check logs. Try `"video_codec": "h264"` as a fallback — H.264 has broader compatibility across NDL versions.
@@ -268,7 +274,9 @@ Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see ab
 Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. Newer TVs provide
 the kernel `hid-playstation` driver directly. Rooted LG1212/O20 TVs using LG's
 4.4.84 kernel can install the bundled compatibility module automatically; other
-older platforms continue to work as input-only through `hid-generic`.
+older platforms continue to work as input-only through `hid-generic`. After the
+compatibility component is installed for the first time, reconnect the
+controller once; the app deliberately does not rebind an active controller.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:

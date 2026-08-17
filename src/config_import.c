@@ -493,7 +493,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         "    \"audio_volume\": 100,\n"
         "    \"wakeup\": %s,\n"
         "    \"ps5_mac\": \"%s\",\n"
-        "    \"wakeup_delay_ms\": 30000,\n"
+        "    \"wakeup_delay_ms\": 60000,\n"
         "    \"sleep_on_exit\": %s,\n"
         "    \"log_level\": \"warning\",\n"
         "    \"psn_refresh_token\": \"%s\",\n"
