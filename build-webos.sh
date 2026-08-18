@@ -16,6 +16,8 @@ SDL2_WEBOS_RELEASE="${SDL2_WEBOS_RELEASE:-release-2.30.12-webos.5}"
 SDL2_WEBOS_VERSION="${SDL2_WEBOS_VERSION:-2.30.12}"
 SDL2_WEBOS_SONAME="${SDL2_WEBOS_SONAME:-libSDL2-2.0.so.0.3000.12}"
 SDL2_WEBOS_SHA256="${SDL2_WEBOS_SHA256:-4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334}"
+LIBEVENT_VERSION="${LIBEVENT_VERSION:-2.1.12-stable}"
+LIBEVENT_SHA256="${LIBEVENT_SHA256:-92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb}"
 
 case "$WEBOS_BUILD_TYPE" in
     Debug|Release|RelWithDebInfo|MinSizeRel) ;;
@@ -280,6 +282,58 @@ build_miniupnpc() {
     cmake --install "$bdir"
 }
 
+# ── libevent ──────────────────────────────────────────────────────────────────
+# chiaki-ng's remote hole-punching code is part of libchiaki and requires the
+# target libevent headers even when the application only starts local sessions.
+build_libevent() {
+    local ver="$LIBEVENT_VERSION"
+    local hash_prefix="${LIBEVENT_SHA256:0:12}"
+    local archive="/tmp/libevent-$ver.tar.gz"
+    local src="/tmp/libevent-$ver-$hash_prefix"
+    local marker="$OUR_STAGING/.libevent-$ver-$hash_prefix"
+    local url="https://github.com/libevent/libevent/releases/download/release-$ver/libevent-$ver.tar.gz"
+
+    if [[ -f "$marker" &&
+          -f "$OUR_STAGING/include/event2/event.h" &&
+          -f "$OUR_STAGING/lib/libevent.a" &&
+          -f "$OUR_STAGING/lib/pkgconfig/libevent.pc" ]]; then
+        echo "-- libevent $ver: skip"
+        return
+    fi
+
+    echo "-- Building libevent $ver"
+    if [[ ! -f "$archive" ]] ||
+       ! echo "$LIBEVENT_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
+        rm -f "$archive"
+        curl --fail --location --retry 5 --output "$archive" "$url"
+    fi
+    echo "$LIBEVENT_SHA256  $archive" | sha256sum --check --strict
+
+    if [[ ! -f "$src/CMakeLists.txt" ]]; then
+        mkdir -p "$src"
+        tar xzf "$archive" -C "$src" --strip-components=1
+    fi
+
+    local bdir="$src/build-webos"
+    cmake -B "$bdir" -S "$src" \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+        -DCMAKE_INSTALL_PREFIX="$OUR_STAGING" \
+        -DEVENT__LIBRARY_TYPE=STATIC \
+        -DEVENT__DISABLE_OPENSSL=ON \
+        -DEVENT__DISABLE_BENCHMARK=ON \
+        -DEVENT__DISABLE_TESTS=ON \
+        -DEVENT__DISABLE_REGRESS=ON \
+        -DEVENT__DISABLE_SAMPLES=ON \
+        -DEVENT__DOXYGEN=OFF
+    cmake --build "$bdir" -j"$NJOBS"
+    cmake --install "$bdir"
+
+    test -f "$OUR_STAGING/include/event2/event.h"
+    test -f "$OUR_STAGING/lib/libevent.a"
+    test -f "$OUR_STAGING/lib/pkgconfig/libevent.pc"
+    touch "$marker"
+}
+
 # ── cURL ──────────────────────────────────────────────────────────────────────
 build_curl() {
     local ver="8.7.1"
@@ -423,6 +477,7 @@ build_openssl
 build_opus
 build_jsonc
 build_miniupnpc
+build_libevent
 build_curl
 build_gf_complete
 build_jerasure

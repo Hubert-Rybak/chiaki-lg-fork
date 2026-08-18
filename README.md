@@ -462,6 +462,7 @@ configuration separate from development builds.
 | json-c | 0.17 | static | Config file parsing |
 | cURL | 8.7.1 | static | PSN API HTTP calls |
 | miniupnpc | 2.2.7 | static | UPnP (chiaki dependency) |
+| libevent | 2.1.12-stable | static | Event loop for chiaki-ng remote hole punching |
 | GF-Complete | master | static | Erasure coding (chiaki dependency) |
 | Jerasure | 2.0 | static | FEC (chiaki dependency) |
 | SDL-webOS | 2.30.12 | bundled dynamic | Window/GL surface, controller mapping/rumble, TV remote input |

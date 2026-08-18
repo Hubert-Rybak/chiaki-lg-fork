@@ -136,6 +136,7 @@ add_subdirectory("${CHIAKI_SOURCE_DIR}/lib" "${CMAKE_BINARY_DIR}/chiaki_lib" EXC
 fix_pkgconfig_target(PkgConfig::json-c)
 fix_pkgconfig_target(PkgConfig::MINIUPNPC)
 fix_pkgconfig_target(PkgConfig::miniupnpc)
+fix_pkgconfig_target(PkgConfig::LIBEVENT)
 
 # ── Our executable ────────────────────────────────────────────────────────────
 add_executable(chiaki-webos
