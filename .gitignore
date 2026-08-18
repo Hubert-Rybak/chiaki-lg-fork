@@ -1,4 +1,5 @@
 build-webos/
+packaging/root/modules/
 cmake/
 third-party/
 *.ipk
@@ -6,3 +7,4 @@ third-party/
 *.a
 *.log
 /tmp/
+.artifacts/

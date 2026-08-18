@@ -18,6 +18,8 @@ concurrency:
 
 env:
   CHIAKI_NG_REF: 83b293983dd950d56c35dd8cb3717841d80838ea
+  RELEASE_APP_ID: org.homebrew.chiaki.fork
+  DEV_APP_ID: org.homebrew.chiaki.fork.dev
   WEBOS_NDK_VERSION: webos-a38c582
   WEBOS_NDK_SHA256: 04ad3311b48b4557a7002aef56ae2e167478e8e129f37daac04649bddf813616
   ARES_CLI_VERSION: v0.5.0
@@ -25,6 +27,10 @@ env:
   NANOPB_VERSION: 0.4.9.1
   PYTHON_PROTOBUF_VERSION: 5.28.3
   GRPCIO_TOOLS_VERSION: 1.68.0
+  SDL2_WEBOS_RELEASE: release-2.30.12-webos.5
+  SDL2_WEBOS_VERSION: 2.30.12
+  SDL2_WEBOS_SONAME: libSDL2-2.0.so.0.3000.12
+  SDL2_WEBOS_SHA256: 4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334
 
 jobs:
   build-ipk:
@@ -43,6 +49,14 @@ jobs:
         id: build-metadata
         shell: bash
         run: |
+          build_tree="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            build_commit="$(python3 -c 'import json, os; print(json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))["pull_request"]["head"]["sha"])')"
+          else
+            build_commit="$build_tree"
+          fi
+          build_commit_short="${build_commit:0:8}"
+
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "Release tags must use the vMAJOR.MINOR.PATCH format." >&2
@@ -51,9 +65,23 @@ jobs:
 
             version="${GITHUB_REF_NAME#v}"
             build_type="Release"
-            artifact_name="chiaki-lg-${GITHUB_REF_NAME}"
+            app_id="$RELEASE_APP_ID"
+            app_title="Chiaki-lg Fork"
+            app_description="PlayStation Remote Play (PS4 / PS5)"
+            artifact_name="chiaki-lg-fork-${GITHUB_REF_NAME}"
+          else
+            version="$(python3 -c 'import json; print(json.load(open("packaging/appinfo.json", encoding="utf-8"))["version"])')"
+            build_type="Debug"
+            app_id="$DEV_APP_ID"
+            app_title="Chiaki Dev $build_commit_short"
+            app_description="Development build $build_commit"
+            artifact_name="chiaki-lg-fork-dev-$build_commit_short"
 
-            python3 - "$version" <<'PY'
+            cp packaging/icon-dev.png packaging/icon.png
+            cp packaging/icon-dev.png packaging/largeIcon.png
+          fi
+
+          python3 - "$version" "$app_id" "$app_title" "$app_description" <<'PY'
           import json
           import pathlib
           import sys
@@ -61,24 +89,28 @@ jobs:
           path = pathlib.Path("packaging/appinfo.json")
           appinfo = json.loads(path.read_text(encoding="utf-8"))
           appinfo["version"] = sys.argv[1]
+          appinfo["id"] = sys.argv[2]
+          appinfo["title"] = sys.argv[3]
+          appinfo["appDescription"] = sys.argv[4]
           path.write_text(json.dumps(appinfo, indent=2) + "\n", encoding="utf-8")
           PY
-          else
-            version="$(python3 -c 'import json; print(json.load(open("packaging/appinfo.json", encoding="utf-8"))["version"])')"
-            build_type="Debug"
-            artifact_name="chiaki-lg-debug-${GITHUB_SHA:0:8}"
-          fi
 
           {
             echo "WEBOS_BUILD_TYPE=$build_type"
             echo "PACKAGE_VERSION=$version"
+            echo "CHIAKI_APP_ID=$app_id"
+            echo "WEBOS_APP_TITLE=$app_title"
+            echo "WEBOS_APP_DESCRIPTION=$app_description"
+            echo "BUILD_COMMIT=$build_commit"
+            echo "BUILD_COMMIT_SHORT=$build_commit_short"
           } >> "$GITHUB_ENV"
           {
             echo "artifact_name=$artifact_name"
             echo "release_version=$version"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Building $build_type IPK version $version"
+          echo "Building $build_type IPK version $version ($app_id)"
+          echo "Source commit: $build_commit (checked-out tree: $build_tree)"
 
       - name: Check out chiaki-ng
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,13 +134,72 @@ jobs:
             build-essential \
             cmake \
             git \
+            gcc-aarch64-linux-gnu \
+            bc \
+            bison \
+            flex \
+            kmod \
             libtool \
+            libssl-dev \
             make \
             ninja-build \
             pkg-config \
             protobuf-compiler \
             python3-pip \
-            wget
+            wget \
+            xz-utils
+
+      - name: Test config import
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Isrc \
+            tests/config_import_test.c \
+            -o "$RUNNER_TEMP/config-import-test"
+          "$RUNNER_TEMP/config-import-test"
+
+      - name: Test DualSense Bluetooth protocol
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/dualsense_test.c src/dualsense.c \
+            -pthread \
+            -o "$RUNNER_TEMP/dualsense-test"
+          "$RUNNER_TEMP/dualsense-test"
+
+      - name: Test root bootstrap and scripts
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            -c src/root_feedback.c \
+            -o "$RUNNER_TEMP/root-feedback.o"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/bt_patch_test.c src/bt_patch.c \
+            -o "$RUNNER_TEMP/bt-patch-test"
+          "$RUNNER_TEMP/bt-patch-test"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tools/chiaki_bt_patch.c src/bt_patch.c \
+            -o "$RUNNER_TEMP/chiaki-bt-patch"
+          set +e
+          "$RUNNER_TEMP/chiaki-bt-patch" 0 >/dev/null 2>&1
+          invalid_pid_status=$?
+          set -e
+          test "$invalid_pid_status" -eq 2
+          sh -n \
+            packaging/root/install.sh \
+            packaging/root/load.sh \
+            packaging/root/boot-hook.sh \
+            packaging/root/uninstall.sh
+          ! grep -F 'load.sh --rebind' packaging/root/boot-hook.sh
+          grep -F '"$STATE_DIR/load.sh" --rebind' packaging/root/install.sh
+          grep -F '%s --rebind-connected' src/root_feedback.c
+          grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
+
+      - name: Build webOS 4.4 DualSense kernel module
+        shell: bash
+        run: |
+          bash kernel/build-webos-module.sh \
+            "$RUNNER_TEMP/linux-4.4-module" \
+            packaging/root/modules/aarch64/4.4.84/lg1212
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -162,6 +253,25 @@ jobs:
         shell: bash
         run: bash ./build-webos.sh "$GITHUB_WORKSPACE/chiaki-ng"
 
+      - name: Add source revision to development IPK filename
+        if: env.WEBOS_BUILD_TYPE == 'Debug'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          ipks=(build-webos/*.ipk)
+          if (( ${#ipks[@]} != 1 )); then
+            echo "Expected exactly one IPK before revision naming, found ${#ipks[@]}." >&2
+            exit 1
+          fi
+
+          source_ipk="${ipks[0]}"
+          stem="${source_ipk%.ipk}"
+          architecture="${stem##*_}"
+          package_and_version="${stem%_*}"
+          revisioned_ipk="${package_and_version}+${BUILD_COMMIT_SHORT}_${architecture}.ipk"
+          mv "$source_ipk" "$revisioned_ipk"
+          echo "Development IPK: $revisioned_ipk"
+
       - name: Save cross-compiled dependency cache
         if: steps.cross-deps-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -185,13 +295,68 @@ jobs:
             sha256sum "$ipk"
           done
 
-          if [[ "$WEBOS_BUILD_TYPE" == "Debug" ]]; then
-            inspect_dir="$(mktemp -d "$RUNNER_TEMP/ipk-inspect.XXXXXX")"
-            dpkg-deb --extract "${ipks[0]}" "$inspect_dir"
-            packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
+          ipk_name="$(basename "${ipks[0]}")"
+          if [[ "$ipk_name" != *"$CHIAKI_APP_ID"* ]]; then
+            echo "IPK filename '$ipk_name' does not contain app ID '$CHIAKI_APP_ID'." >&2
+            exit 1
+          fi
 
-            if [[ -z "$packaged_binary" ]]; then
-              echo "Could not find chiaki-webos inside ${ipks[0]}." >&2
+          inspect_dir="$(mktemp -d "$RUNNER_TEMP/ipk-inspect.XXXXXX")"
+          dpkg-deb --extract "${ipks[0]}" "$inspect_dir"
+          packaged_appinfo="$(find "$inspect_dir" -type f -name appinfo.json -print -quit)"
+
+          if [[ -z "$packaged_appinfo" ]]; then
+            echo "Could not find appinfo.json inside ${ipks[0]}." >&2
+            exit 1
+          fi
+
+          python3 - "$packaged_appinfo" "$CHIAKI_APP_ID" "$WEBOS_APP_TITLE" "$WEBOS_APP_DESCRIPTION" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          appinfo = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if appinfo.get("id") != sys.argv[2]:
+              raise SystemExit(f"Packaged app ID {appinfo.get('id')!r} != {sys.argv[2]!r}")
+          if appinfo.get("title") != sys.argv[3]:
+              raise SystemExit(f"Packaged title {appinfo.get('title')!r} != {sys.argv[3]!r}")
+          if appinfo.get("appDescription") != sys.argv[4]:
+              raise SystemExit(
+                  f"Packaged description {appinfo.get('appDescription')!r} != {sys.argv[4]!r}"
+              )
+          PY
+
+          packaged_root="$(dirname "$packaged_appinfo")"
+          cmp packaging/icon.png "$packaged_root/icon.png"
+          cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
+          test -s "$packaged_root/lib/libSDL2-2.0.so.0"
+          test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
+          test -s "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko"
+          test -s "$packaged_root/root/install.sh"
+          test -s "$packaged_root/root/load.sh"
+          test -s "$packaged_root/root/boot-hook.sh"
+          test -s "$packaged_root/root/uninstall.sh"
+          test -x "$packaged_root/root/chiaki-bt-patch"
+          "$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" -h \
+            "$packaged_root/root/chiaki-bt-patch" \
+            | grep -F 'Machine:' \
+            | grep -F 'ARM'
+          aarch64-linux-gnu-readelf -h \
+            "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko" \
+            | grep -F 'Machine:' \
+            | grep -F 'AArch64'
+
+          packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
+          if [[ -z "$packaged_binary" ]]; then
+            echo "Could not find chiaki-webos inside ${ipks[0]}." >&2
+            exit 1
+          fi
+          "$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" --dynamic "$packaged_binary" \
+            | grep -F 'Shared library: [libSDL2-2.0.so.0]'
+
+          if [[ "$WEBOS_BUILD_TYPE" == "Debug" ]]; then
+            if [[ "$ipk_name" != *"+$BUILD_COMMIT_SHORT"* ]]; then
+              echo "Development IPK filename '$ipk_name' does not contain commit '$BUILD_COMMIT_SHORT'." >&2
               exit 1
             fi
 

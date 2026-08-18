@@ -1,4 +1,4 @@
-# Chiaki-lg
+# Chiaki-lg Fork
 
 A native port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) for LG webOS smart TVs.
 Streams PS4/PS5 Remote Play directly to your LG webOS TV.
@@ -16,8 +16,10 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
-- **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`)
-- **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to auto-import registration credentials (PS5 IP still required)
+- **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads through SDL's standardized controller mapping
+- **Controller feedback** — rumble for supported pads, PS5 haptic-to-rumble feedback, and DualSense adaptive triggers, lightbar, and player LEDs
+- **Magic Remote friendly** — d-pad navigation, pointer hover/click, number-pad IP entry, and Red as a Back/disconnect substitute
+- **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to import registration credentials and the matching manual-host IP
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
 - **Sleep-on-exit** — sends PS5 to rest mode when you quit the app
@@ -25,6 +27,36 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Stats overlay** — real-time bitrate, FPS, codec, and latency display toggled with the TV remote UP button
 - **webOS version auto-detection** — automatically selects the correct NDL backend (`ndl-webos5` or `ndl-webos4`) at runtime
 - **Two-tier logging** — critical diagnostics always written; verbose chatter gated by `log_level`
+
+---
+
+## How this fork differs from the original Chiaki-lg build
+
+This fork keeps the original Chiaki-lg hardware-accelerated streaming pipeline,
+but improves controller handling, connection recovery, TV navigation, and
+package management. The comparison below refers to the original
+`org.homebrew.chiaki` version from which this repository was forked.
+
+| Area | Original Chiaki-lg | This fork |
+|---|---|---|
+| PlayStation controls | Direct evdev mapping; button and axis aliases can vary by TV kernel | Bundled SDL GameController mappings with corrected Square/Triangle positions, analog L2/R2, sticks, and hotplug |
+| Controller feedback | Controller input only | Rumble for supported pads, PS5 haptic-to-rumble conversion, and DualSense adaptive triggers, lightbar, and player LEDs |
+| Older webOS DualSense support | No feedback path for TVs without LG's `hid-playstation` driver | Optional rooted compatibility driver and a signature-checked, memory-only correction for LG's Bluetooth output-report bug on supported LG1212/O20 TVs |
+| PS5 connection failures | An initial session failure can terminate the app | Failed initial connections return to the launcher with an error so settings or the address can be corrected |
+| Config import | Imports registration credentials; the console IP must be entered separately | Also imports the manual-host address matching the selected registered console when available |
+| Magic Remote | Basic remote handling | D-pad navigation, pointer hover/click, number-pad PIN/IP entry, and Red as Back/disconnect |
+| Installation identity | `org.homebrew.chiaki` | Release ID `org.homebrew.chiaki.fork` and development ID `org.homebrew.chiaki.fork.dev`, allowing all variants to coexist |
+| Development builds | No source revision in the installed identity | `DEV`-badged icon plus the exact commit hash in the launcher title, description, artifact name, and IPK filename |
+
+The rooted compatibility path is deliberately conservative. It does not edit
+LG firmware files, rejects unknown Bluetooth-library signatures and unsupported
+kernels, and can be removed with the bundled uninstaller. Root is not required
+for normal streaming, controller input, Magic Remote support, or TVs that
+already provide a suitable PlayStation driver.
+
+The core limitations remain the same: console registration is performed with
+desktop chiaki-ng, and actual codec/resolution support still depends on the
+TV's webOS NDL implementation.
 
 ---
 
@@ -36,7 +68,7 @@ Download the latest `.ipk` from the [Releases](../../releases/latest) page, then
 
 ```bash
 ares-setup-device   # one-time TV setup — TV must be on and in Developer Mode
-ares-install --device myTV chiaki-lg_*.ipk
+ares-install --device myTV org.homebrew.chiaki.fork_*.ipk
 ```
 
 Or use [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) if you prefer a GUI — it can install IPKs directly via drag and drop.
@@ -57,19 +89,19 @@ Chiaki-lg does not handle PS5 registration itself. You must have already registe
 
 ```bash
 adb push chiaki-ng-Default.ini \
-  /media/developer/apps/usr/palm/applications/org.homebrew.chiaki/chiaki-ng-Default.ini
+  /media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/chiaki-ng-Default.ini
 ```
 
 Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop)'s file browser.
 
 ### Step 4 — Launch and connect
 
-1. Launch **Chiaki-lg** on the TV
-2. Enter the local IP address of your PS5 and click **Import Config**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
+1. Launch **Chiaki-lg Fork** on the TV
+2. Click **Import Config**. The matching local PS5 address is imported when it is present in the export; otherwise, enter it manually. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
 3. Open **Settings** and change anything as needed
 4. Select **Connect** — streaming starts immediately
 
-> The `.ini` file does not contain your PS5's IP address. You must enter it manually before importing.
+> If the export contains several consoles, verify the imported address before connecting. The app currently imports the first registered console and its matching manual host.
 
 ---
 
@@ -77,7 +109,7 @@ Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-des
 
 Config file location on the TV:
 ```
-/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/config.json
+/media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/config.json
 ```
 
 Most settings are managed through the in-app Settings screen. You can also edit the file directly via SSH or WebOS Dev Manager.
@@ -146,16 +178,63 @@ Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`
 
 Connect a gamepad via Bluetooth or USB. Supported controllers include DualSense, DualShock 4, Xbox Wireless Controller, and most HID-compliant gamepads.
 
-The app uses direct evdev access with `EVIOCGRAB` to take exclusive control of the gamepad at the kernel level, preventing webOS from intercepting buttons (B→Back, A→OK, Guide→Home).
+The app bundles the webosbrew SDL 2.30.12 backport and uses its standardized
+GameController mapping. This keeps the PlayStation face-button positions and
+trigger axes consistent across DualSense, DualShock, Xbox, and other pads.
+
+Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
+haptic audio stream is translated to the controller motors. A Bluetooth
+DualSense additionally receives adaptive-trigger effects, lightbar colour, and
+player-LED state through webOS's Bluetooth HID service.
+
+Newer TVs include LG's `hid-playstation` driver and work without setup. The IPK
+also bundles a minimal compatibility driver for rooted ARM64 LG1212/O20 TVs
+using LG's 4.4.84 kernel (webOS 5/6 generation). It is built against LG's
+published `lg1k` kernel source and configuration so its in-kernel structure ABI
+matches these TVs. On first launch, the app asks Homebrew Channel's elevated
+service to install it under
+`/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
+`90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
+unchanged. On app launch only, a connected compatible pad is handed from
+`hid-generic` to `playstation` before SDL initializes. The boot hook never
+rebinds pads, and the app never rebinds one during an active input session. If a
+pad is first connected after the app has launched, restart the app once to get
+feedback; input remains available through `hid-generic` in the meantime.
+
+These older releases also contain an LG Bluetooth-stack bug that labels HID
+output as a feature report. The root component includes a small runtime helper
+that scans the running Bluetooth daemon for one exact instruction signature and
+changes only the report-type immediate from `3` to `2`. The correction is made
+in process memory: the firmware library on disk is never replaced or edited,
+ambiguous/unknown builds fail closed, app launch reapplies it after daemon
+restarts, and uninstall restores the live byte when applicable.
+
+The compatibility module is selected by CPU architecture, kernel release,
+device-tree platform, and module vermagic. It preserves the descriptor-derived
+input mapping while adding native `EV_FF` rumble and the DualSense initialization
+needed by Bluetooth trigger/light reports. The rumble mode follows Sony's
+firmware feature version when available and defaults to the current vibration-v2
+protocol. Installation diagnostics are written to
+`/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
+`/tmp/chiaki-hid-playstation.log`.
+
+To remove the root component and return connected pads to `hid-generic`:
+
+```sh
+/var/lib/webosbrew/chiaki-dualsense/uninstall.sh
+```
 
 The TV remote is not forwarded to the PS5 as controller input. During streaming it serves only:
 
 | TV Remote Button | Action |
 |---|---|
-| **Up** (hold 0.5 s) | Toggle stats overlay |
-| **Up** (short press) | Forwarded to PS5 as D-pad up |
-| **Back** | Exit the app |
+| **Up** | Toggle stats overlay |
+| **Other navigation buttons** | Reserved by the app during a stream |
+| **Back / Red** | Disconnect and exit the app |
 | **Home** | Exit the app |
+
+In the launcher and Settings screens, the Magic Remote supports d-pad/OK,
+pointer hover and click, and direct number-pad entry for the console IP.
 
 ---
 
@@ -179,6 +258,10 @@ Set `"log_level": "info"` or `"debug"` in config.json for more detail. Critical 
 
 **Stream doesn't start / connection timeout**
 Ensure Remote Play is enabled on your PS5 (Settings → System → Remote Play → Enable Remote Play). Verify the IP in `config.json` and that the TV and PS5 are on the same subnet.
+When wakeup is enabled, the app first checks whether the console is already
+ready and skips PSN/UDP wakeup in that case. Imported configurations wait up to
+60 seconds. If the console remains unreachable, the app returns to the launcher
+with a specific wakeup error instead of starting a session that cannot succeed.
 
 **Black screen with audio**
 Likely a codec or NDL issue. Check logs. Try `"video_codec": "h264"` as a fallback — H.264 has broader compatibility across NDL versions.
@@ -189,15 +272,27 @@ Check `/tmp/chiaki.log` for the `[AUTO]` line confirming which SS4S module was s
 **PS5 won't wake from rest mode**
 Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see above).
 
-**Gamepad buttons intercepted by webOS**
-Check logs for `EVIOCGRAB FAILED`. Disconnect and reconnect the controller after launching the app.
+**Controller input works but rumble/triggers/lightbar do not**
+Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. Newer TVs provide
+the kernel `hid-playstation` driver directly. Rooted LG1212/O20 TVs using LG's
+4.4.84 kernel can install the bundled compatibility module automatically; other
+older platforms continue to work as input-only through `hid-generic`. Keep the
+controller connected while launching the app so the compatibility driver can
+claim it before SDL starts. If it is connected later, restart the app once. The
+app deliberately avoids rebinding or sending advanced feedback through the
+wrong driver during an active controller session.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
-`/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/`
+`/media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/`
 
 **App crashes on launch**
 Usually a malformed `config.json`. Check `/tmp/chiaki.log`. Delete the config file to let the app recreate defaults, then repeat the import.
+
+**App returns to the launcher after “Starting stream”**
+The PS5 rejected the initial session request or could not be reached. Verify the
+local PS5 address and ensure Remote Play is enabled. The launcher displays the
+connection error instead of terminating the app.
 
 ---
 
@@ -213,7 +308,12 @@ Raw Opus packets from the chiaki-ng audio callback are fed directly to `SS4S_Pla
 
 ### Input pipeline
 
-Gamepad input uses direct Linux evdev reads with `EVIOCGRAB` for exclusive device access, bypassing SDL's joystick subsystem. The evdev reader runs in a dedicated thread and pushes `ChiakiControllerState` updates directly to the chiaki session.
+Gamepad input uses the bundled webosbrew SDL GameController layer. SDL's
+standard A/B/X/Y and trigger axes are translated to `ChiakiControllerState`,
+with controller hotplug handled by the main event loop. Ordinary rumble uses
+SDL/evdev force feedback. DualSense trigger/light state is coalesced and sent
+from a rate-limited worker through the public webOS Bluetooth service, keeping
+process creation off the render loop.
 
 ### webOS version auto-detection
 
@@ -249,7 +349,7 @@ export TOOLCHAIN_DIR=~/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
 ./build-webos.sh ../chiaki-ng 2>&1 | tee build.log
 ```
 
-The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
+The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), installs the pinned SDL-webOS backport, patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
 
 The IPK is output to `build-webos/*.ipk`.
 
@@ -258,11 +358,17 @@ The IPK is output to `build-webos/*.ipk`.
 Branch pushes, pull requests, and manual workflow runs produce a `Debug` IPK
 under the workflow run's **Artifacts** section. The packaged executable retains
 its debug information so it can be used for testing and diagnostics. CI keeps
-these artifacts for 14 days.
+these artifacts for 14 days. Development builds use the distinct application ID
+`org.homebrew.chiaki.fork.dev` and a `DEV`-badged icon, so they can be installed
+alongside release builds. Their launcher title and description identify the
+exact source commit, and the short commit hash is included in the IPK filename,
+for example `org.homebrew.chiaki.fork.dev_0.1.1+a1b2c3d4_arm.ipk`.
 
 Pushing a version tag in the exact `vMAJOR.MINOR.PATCH` format (for example,
 `v0.2.0`) builds a stripped `Release` IPK, sets the application version from the
 tag, creates the corresponding GitHub Release, and attaches the IPK to it.
+Release builds use the application ID `org.homebrew.chiaki.fork` and keep their
+configuration separate from development builds.
 
 ### Common build errors
 
@@ -281,7 +387,8 @@ tag, creates the corresponding GitHub Release, and attaches the IPK to it.
 | `config_import.c` / `config_import.h` | chiaki-ng INI settings import |
 | `video.c` / `video.h` | Video callback → SS4S/NDL feed, codec negotiation, stats counters |
 | `audio.c` / `audio.h` | Audio callback → SS4S/NDL Opus feed |
-| `input.c` / `input.h` | Evdev gamepad reader thread with `EVIOCGRAB` |
+| `input.c` / `input.h` | SDL gamepad mapping, hotplug, rumble, and PS5 haptics |
+| `dualsense.c` / `dualsense.h` | Rate-limited DualSense Bluetooth HID feedback |
 | `ui.c` / `ui.h` | Launcher UI, settings screen, loading screen, stats overlay renderer |
 | `stats.c` / `stats.h` | Thread-safe stream statistics and overlay state |
 | `app_log.h` | Shared logging macros |
@@ -308,7 +415,7 @@ tag, creates the corresponding GitHub Release, and attaches the IPK to it.
 | miniupnpc | 2.2.7 | static | UPnP (chiaki dependency) |
 | GF-Complete | master | static | Erasure coding (chiaki dependency) |
 | Jerasure | 2.0 | static | FEC (chiaki dependency) |
-| SDL2 | 2.30.x | dynamic | Window/GL surface, TV remote input |
+| SDL-webOS | 2.30.12 | bundled dynamic | Window/GL surface, controller mapping/rumble, TV remote input |
 | nanopb | 0.4.x | static | Protobuf (chiaki submodule) |
 
 ---

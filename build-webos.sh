@@ -9,6 +9,11 @@ CHIAKI_NG_DIR="$(realpath "${1:-$SCRIPT_DIR/../chiaki-ng}")"
 BUILD_DIR="$SCRIPT_DIR/build-webos"
 OUR_STAGING="/tmp/webos-staging"
 WEBOS_BUILD_TYPE="${WEBOS_BUILD_TYPE:-Release}"
+CHIAKI_APP_ID="${CHIAKI_APP_ID:-org.homebrew.chiaki.fork}"
+SDL2_WEBOS_RELEASE="${SDL2_WEBOS_RELEASE:-release-2.30.12-webos.5}"
+SDL2_WEBOS_VERSION="${SDL2_WEBOS_VERSION:-2.30.12}"
+SDL2_WEBOS_SONAME="${SDL2_WEBOS_SONAME:-libSDL2-2.0.so.0.3000.12}"
+SDL2_WEBOS_SHA256="${SDL2_WEBOS_SHA256:-4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334}"
 
 case "$WEBOS_BUILD_TYPE" in
     Debug|Release|RelWithDebInfo|MinSizeRel) ;;
@@ -18,6 +23,11 @@ case "$WEBOS_BUILD_TYPE" in
         exit 1
         ;;
 esac
+
+if [[ ! "$CHIAKI_APP_ID" =~ ^[a-z0-9][a-z0-9.-]+$ ]]; then
+    echo "ERROR: Invalid CHIAKI_APP_ID '$CHIAKI_APP_ID'."
+    exit 1
+fi
 
 # ── Validate toolchain ────────────────────────────────────────────────────────
 if [[ -z "${TOOLCHAIN_DIR:-}" ]]; then
@@ -86,6 +96,54 @@ echo ""
 mkdir -p "$OUR_STAGING"
 mkdir -p "$BUILD_DIR"
 NJOBS=$(nproc)
+
+# ── SDL-webOS ────────────────────────────────────────────────────────────────
+# The TV's SDL 2.0.10 predates DualSense. Use the same webosbrew build proven by
+# punktfunk-webos, both for the standardized controller mapping and evdev FF.
+install_sdl2_webos() {
+    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_VERSION"
+    local runtime="$OUR_STAGING/lib/$SDL2_WEBOS_SONAME"
+    if [[ -f "$marker" && -f "$runtime" &&
+          -f "$OUR_STAGING/include/SDL2/SDL_gamecontroller.h" ]]; then
+        echo "-- SDL-webOS $SDL2_WEBOS_VERSION: skip"
+        return
+    fi
+
+    local asset="SDL2-$SDL2_WEBOS_VERSION-webos.tar.gz"
+    local archive="/tmp/$asset"
+    local url="https://github.com/webosbrew/SDL-webOS/releases/download/$SDL2_WEBOS_RELEASE/$asset"
+    echo "-- Installing SDL-webOS $SDL2_WEBOS_VERSION"
+    if [[ ! -f "$archive" ]] ||
+       ! echo "$SDL2_WEBOS_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
+        rm -f "$archive"
+        curl --fail --location --retry 5 --output "$archive" "$url"
+    fi
+    echo "$SDL2_WEBOS_SHA256  $archive" | sha256sum --check --strict
+
+    local extracted
+    extracted="$(mktemp -d /tmp/sdl-webos.XXXXXX)"
+    tar xzf "$archive" -C "$extracted"
+    mkdir -p "$OUR_STAGING/include/SDL2" "$OUR_STAGING/lib/pkgconfig"
+    cp -RL "$extracted/include/SDL2/." "$OUR_STAGING/include/SDL2/"
+    cp -L "$extracted/lib/$SDL2_WEBOS_SONAME" "$runtime"
+    ln -sf "$SDL2_WEBOS_SONAME" "$OUR_STAGING/lib/libSDL2-2.0.so.0"
+    ln -sf "$SDL2_WEBOS_SONAME" "$OUR_STAGING/lib/libSDL2.so"
+
+    cat > "$OUR_STAGING/lib/pkgconfig/sdl2.pc" << SDL2_PC_EOF
+prefix=$OUR_STAGING
+exec_prefix=$OUR_STAGING
+libdir=$OUR_STAGING/lib
+includedir=$OUR_STAGING/include
+
+Name: sdl2
+Description: Simple DirectMedia Layer (webOS backport)
+Version: $SDL2_WEBOS_VERSION
+Libs: -L$OUR_STAGING/lib -lSDL2
+Cflags: -I$OUR_STAGING/include/SDL2 -D_REENTRANT
+SDL2_PC_EOF
+    touch "$marker"
+    rm -rf "$extracted"
+}
 
 # ── OpenSSL ───────────────────────────────────────────────────────────────────
 build_openssl() {
@@ -342,6 +400,7 @@ build_jerasure() {
     echo "-- Jerasure built: ${#objects[@]} objects"
 }
 
+install_sdl2_webos
 build_openssl
 build_opus
 build_jsonc
@@ -586,9 +645,11 @@ rm -rf "$BUILD_DIR/CMakeFiles"
 cmake -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_BUILD_TYPE="$WEBOS_BUILD_TYPE" \
+    -DAPP_ID="$CHIAKI_APP_ID" \
     -DWEBOS_BUILD=ON \
     -DWEBOS_STAGING_DIR="$OUR_STAGING" \
     -DCHIAKI_SOURCE_DIR="$CHIAKI_NG_DIR" \
+    -DSDL2_BUNDLED_LIBRARY="$OUR_STAGING/lib/$SDL2_WEBOS_SONAME" \
     -DCMAKE_INSTALL_PREFIX="/app" \
     -DOPENSSL_ROOT_DIR="$OUR_STAGING" \
     -DOPENSSL_INCLUDE_DIR="$OUR_STAGING/include" \

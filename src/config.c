@@ -96,6 +96,12 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->wakeup_delay_ms  = json_get_int(root,  "wakeup_delay_ms",  60000);
     cfg->sleep_on_exit    = json_get_bool(root, "sleep_on_exit",    true);
 
+    /* Early fork imports wrote 30 seconds even though the application default
+     * and documentation use 60. Keep those existing installations reliable
+     * without rewriting their config file. */
+    if (cfg->wakeup_delay_ms == 30000)
+        cfg->wakeup_delay_ms = 60000;
+
     // log_level: string or legacy bool
     {
         struct json_object *lv;

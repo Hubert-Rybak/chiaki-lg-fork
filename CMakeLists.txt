@@ -10,6 +10,13 @@ option(WEBOS_BUILD "Cross-compile for webOS TV" OFF)
 
 set(WEBOS_STAGING_DIR "/tmp/webos-staging" CACHE PATH "Cross-compiled deps staging dir")
 set(CHIAKI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../chiaki-ng" CACHE PATH "chiaki-ng source directory")
+set(APP_ID "org.homebrew.chiaki.fork" CACHE STRING "webOS application ID")
+set(SDL2_BUNDLED_LIBRARY "" CACHE FILEPATH "SDL-webOS runtime library bundled in the IPK")
+
+if(NOT APP_ID MATCHES "^[a-z0-9][a-z0-9.-]+$")
+    message(FATAL_ERROR "Invalid webOS APP_ID: ${APP_ID}")
+endif()
+message(STATUS "webOS application ID: ${APP_ID}")
 
 # ── CMake module path ─────────────────────────────────────────────────────────
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -17,6 +24,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # ── Platform setup ────────────────────────────────────────────────────────────
 if(WEBOS_BUILD OR CMAKE_CROSSCOMPILING)
     message(STATUS "webOS cross-compile build")
+    # SDL-webOS exposes its compositor/window extensions from SDL_system.h only
+    # when this platform macro is set. The SDK compiler does not define it, but
+    # ss4s needs those declarations for its webOS 5 SMP backend.
+    add_compile_definitions(__WEBOS__=1)
     list(APPEND CMAKE_PREFIX_PATH "${WEBOS_STAGING_DIR}")
     set(PKG_CONFIG_USE_CMAKE_PREFIX_PATH TRUE)
     set(CMAKE_INSTALL_PREFIX "/app" CACHE STRING "" FORCE)
@@ -130,8 +141,20 @@ add_executable(chiaki-webos
     src/video.c
     src/audio.c
     src/input.c
+    src/dualsense.c
+    src/root_feedback.c
     src/ui.c
     src/stats.c
+)
+
+add_executable(chiaki-bt-patch
+    tools/chiaki_bt_patch.c
+    src/bt_patch.c
+)
+target_include_directories(chiaki-bt-patch PRIVATE src/)
+
+target_compile_definitions(chiaki-webos PRIVATE
+    CHIAKI_APP_ID=\"${APP_ID}\"
 )
 
 # Embed rpath so the binary finds ss4s module .so files in lib/ next to itself
@@ -178,12 +201,27 @@ target_link_options(chiaki-webos PRIVATE
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS chiaki-webos RUNTIME DESTINATION .)
+install(TARGETS chiaki-bt-patch RUNTIME DESTINATION root)
 install(FILES
     packaging/appinfo.json
     packaging/icon.png
     packaging/largeIcon.png
+    THIRD-PARTY-NOTICES.md
     DESTINATION .
 )
+install(DIRECTORY packaging/root/
+    DESTINATION root
+    USE_SOURCE_PERMISSIONS
+)
+if(SDL2_BUNDLED_LIBRARY)
+    if(NOT EXISTS "${SDL2_BUNDLED_LIBRARY}")
+        message(FATAL_ERROR "Bundled SDL runtime not found: ${SDL2_BUNDLED_LIBRARY}")
+    endif()
+    install(FILES "${SDL2_BUNDLED_LIBRARY}"
+        DESTINATION lib
+        RENAME libSDL2-2.0.so.0
+    )
+endif()
 # Install ss4s module .so files into lib/ alongside the binary
 install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
     DESTINATION lib
@@ -193,10 +231,9 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
 
 # ── IPK packaging via ares-package ────────────────────────────────────────────
 set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
-set(APP_ID "org.homebrew.chiaki")
 
 add_custom_target(ipk
-    DEPENDS chiaki-webos
+    DEPENDS chiaki-webos chiaki-bt-patch
 
     COMMAND ${CMAKE_COMMAND} -E make_directory "${IPK_STAGING_DIR}"
     COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${IPK_STAGING_DIR}"

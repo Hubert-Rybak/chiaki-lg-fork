@@ -1,5 +1,8 @@
 #include "ui.h"
+#include "app_id.h"
 #include "config.h"
+#include "input.h"
+#include "webos_keys.h"
 
 #include <SDL2/SDL.h>
 #include <stdio.h>
@@ -40,12 +43,6 @@
 /* Footer */
 #define FOOTER_Y    (CONTENT_Y + CONTENT_H + 22)   /* 862 */
 #define FOOTER_H    62
-
-/* webOS remote keys we can actually use inside this native SDL UI.
- * BACK is often intercepted by webOS before SDL sees it on newer TVs,
- * so RED is offered as an in-app fallback "Return" key. */
-#define WEBOS_KEY_BACK 1073742094
-#define WEBOS_KEY_RED  403
 
 /* ── Colour palette (R,G,B,A) ─────────────────────────────────────────────── */
 
@@ -225,6 +222,55 @@ static int text_width(const char *text, int scale)
     for (const char *p = text; *p && *p != '\n'; p++)
         w += 6 * scale;
     return w;
+}
+
+static bool point_in_rect(int x, int y, int rx, int ry, int rw, int rh)
+{
+    return x >= rx && y >= ry && x < rx + rw && y < ry + rh;
+}
+
+/* Mouse coordinates are window pixels; all UI hitboxes use the 1920x1080 canvas. */
+static void pointer_to_ui(SDL_Renderer *renderer, int x, int y,
+                          int *ui_x, int *ui_y)
+{
+    int out_w = SCREEN_W, out_h = SCREEN_H;
+    if (SDL_GetRendererOutputSize(renderer, &out_w, &out_h) != 0 ||
+        out_w <= 0 || out_h <= 0) {
+        out_w = SCREEN_W;
+        out_h = SCREEN_H;
+    }
+    *ui_x = x * SCREEN_W / out_w;
+    *ui_y = y * SCREEN_H / out_h;
+}
+
+static void push_ui_key(SDL_Keycode key)
+{
+    SDL_Event fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.type = SDL_KEYDOWN;
+    fake.key.state = SDL_PRESSED;
+    fake.key.keysym.sym = key;
+    SDL_PushEvent(&fake);
+}
+
+static SDL_Keycode stick_nav_key(const SDL_ControllerAxisEvent *axis,
+                                 int *x_state, int *y_state)
+{
+    const int deadzone = 16000;
+    int direction = axis->value <= -deadzone ? -1 :
+                    axis->value >=  deadzone ?  1 : 0;
+    int *state = NULL;
+    SDL_Keycode negative = 0, positive = 0;
+    if (axis->axis == SDL_CONTROLLER_AXIS_LEFTX) {
+        state = x_state; negative = SDLK_LEFT; positive = SDLK_RIGHT;
+    } else if (axis->axis == SDL_CONTROLLER_AXIS_LEFTY) {
+        state = y_state; negative = SDLK_UP; positive = SDLK_DOWN;
+    } else {
+        return 0;
+    }
+    if (*state == direction) return 0;
+    *state = direction;
+    return direction < 0 ? negative : direction > 0 ? positive : 0;
 }
 
 static void draw_text_centered(SDL_Renderer *r, int cx, int y,
@@ -421,7 +467,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
                                 const char *ip, int focus,
                                 const char *msg,
                                 bool has_keys,
-                                bool can_import,
+                                bool has_valid_ip,
                                 bool can_connect,
                                 bool show_keypad)
 {
@@ -553,7 +599,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         draw_code_block(r, ix, iy, iw,
             "adb push chiaki-ng-Default.ini \\\n"
             " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
+            " applications/" CHIAKI_APP_ID "/", 2);
         iy += 114;
 
 		set_color(r, COL_TEXT_DIM);
@@ -561,14 +607,14 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
 		
 		draw_code_block(r, ix, iy, iw,
             " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
+            " applications/" CHIAKI_APP_ID "/", 2);
         iy += 114;
 
         set_color(r, COL_TEXT_DIM);
         draw_text(r, ix, iy, "Then on this screen:", 2); iy += 22;
         set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "1. Enter your PS5 IP address", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "2. Press  Import Config", 2);
+        draw_text(r, ix + 14, iy, "Press  Import Config", 2); iy += 20;
+        draw_text(r, ix + 14, iy, "The matching PS5 IP is imported too", 2);
 
     } else if (step == 2) {
         set_color(r, COL_ACCENT);
@@ -665,7 +711,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         int btn_h = 80;
         int btn_w = (rw - 20) / 2;
 
-        draw_button(r, rx,              ry, btn_w, btn_h, "Import Config", focus == 13, can_import);
+        draw_button(r, rx,              ry, btn_w, btn_h, "Import Config", focus == 13, true);
         draw_button(r, rx + btn_w + 20, ry, btn_w, btn_h, "Connect",       focus == 14, can_connect);
         ry += btn_h + 16;
 
@@ -674,14 +720,9 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         ry += 60 + 36;
 
         /* Contextual guidance */
-        if (step == 1 && !can_import) {
-            set_color(r, COL_TEXT_FAINT);
-            draw_text(r, rx, ry, "Enter a PS5 IP address above,", 2); ry += 20;
-            draw_text(r, rx, ry, "then press Import Config to load", 2); ry += 20;
-            draw_text(r, rx, ry, "your registration keys.", 2);
-        } else if (step == 1 && can_import) {
+        if (step == 1) {
             set_color(r, COL_TEXT_DIM);
-            draw_text(r, rx, ry, "IP looks good. If you have copied", 2); ry += 20;
+            draw_text(r, rx, ry, "If you have copied", 2); ry += 20;
             draw_text(r, rx, ry, "chiaki-ng-Default.ini to the TV,", 2); ry += 20;
             draw_text(r, rx, ry, "press  Import Config  to continue.", 2);
         } else if (step == 2) {
@@ -716,7 +757,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
 
     pill_x += draw_status_pill(r, pill_x, pill_y, "Keys: Ready", has_keys);
     pill_x += draw_status_pill(r, pill_x, pill_y, ip && ip[0] ? ip : "IP: Not Set",
-                                can_import);
+                                has_valid_ip);
     /* Note: can_connect also requires keys, so it's only true if both are set */
     if (can_connect)
         draw_status_pill(r, pill_x, pill_y, "Ready", true);
@@ -758,6 +799,21 @@ typedef enum {
     SET_RETURN,
     SET_COUNT
 } SettingsFocus;
+
+static int settings_focus_at(int x, int y)
+{
+    const int row_x = 236;
+    const int row_w = 1448;
+    static const int row_y[SET_COUNT] = {
+        206, 256, 306, 356, 430, 480, 530, 604, 654, 712
+    };
+    for (int i = 0; i < SET_COUNT; ++i) {
+        int height = i == SET_RETURN ? 50 : 44;
+        if (point_in_rect(x, y, row_x, row_y[i], row_w, height))
+            return i;
+    }
+    return -1;
+}
 
 typedef struct { int w, h; const char *label; } ResOption;
 
@@ -1269,7 +1325,7 @@ static void ui_apply_settings_indices(AppConfig *cfg,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path)
+                             const char *config_path, InputContext *input_ctx)
 {
     if (!renderer || !cfg) return;
 
@@ -1282,14 +1338,16 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
     char msg[256] = {0};
 
     bool wants_exit = false;
+    int stick_x = 0, stick_y = 0;
 
     while (1) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
+            input_handle_event(input_ctx, &ev);
             if (ev.type == SDL_QUIT) { wants_exit = true; continue; }
             if (ev.type == SDL_KEYDOWN) {
                 SDL_Keycode sym = ev.key.keysym.sym;
-                if (sym == SDLK_ESCAPE || sym == WEBOS_KEY_BACK || sym == WEBOS_KEY_RED) { wants_exit = true; continue; }
+                if (webos_event_is_back_or_red(&ev.key)) { wants_exit = true; continue; }
 
                 if      (sym == SDLK_UP   && focus > 0)          focus--;
                 else if (sym == SDLK_DOWN && focus < SET_RETURN) focus++;
@@ -1330,9 +1388,24 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
                 else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_A)          fake_sym = SDLK_RETURN;
 
                 if (fake_sym) {
-                    SDL_Event fake; memset(&fake, 0, sizeof(fake));
-                    fake.type = SDL_KEYDOWN; fake.key.keysym.sym = fake_sym;
-                    SDL_PushEvent(&fake);
+                    push_ui_key(fake_sym);
+                }
+            } else if (ev.type == SDL_CONTROLLERAXISMOTION) {
+                SDL_Keycode key = stick_nav_key(&ev.caxis, &stick_x, &stick_y);
+                if (key) push_ui_key(key);
+            } else if (ev.type == SDL_MOUSEMOTION) {
+                int x, y;
+                pointer_to_ui(renderer, ev.motion.x, ev.motion.y, &x, &y);
+                int hovered = settings_focus_at(x, y);
+                if (hovered >= 0) focus = hovered;
+            } else if (ev.type == SDL_MOUSEBUTTONDOWN &&
+                       ev.button.button == SDL_BUTTON_LEFT) {
+                int x, y;
+                pointer_to_ui(renderer, ev.button.x, ev.button.y, &x, &y);
+                int clicked = settings_focus_at(x, y);
+                if (clicked >= 0) {
+                    focus = clicked;
+                    push_ui_key(SDLK_RETURN);
                 }
             }
         }
@@ -1350,6 +1423,7 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
         ui_render_settings_screen(renderer, cfg, focus, msg,
                                    res_idx, fps_idx, br_idx, codec_idx, log_idx);
         SDL_RenderPresent(renderer);
+        input_pump(input_ctx);
         SDL_Delay(16);
     }
 }
@@ -1358,8 +1432,44 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
  * Main registration / launcher UI
  * ══════════════════════════════════════════════════════════════════════════ */
 
+static int setup_focus_at(int x, int y, bool editing)
+{
+    const int rx = RIGHT_X + 52;
+    const int rw = RIGHT_W - 104;
+    const int input_y = CONTENT_Y + 52 + 26;
+    if (point_in_rect(x, y, rx, input_y, rw, 72))
+        return 0;
+
+    int action_y = input_y + 72 + 20;
+    if (editing) {
+        const int key_y = action_y + 26;
+        const int key_w = 128, key_h = 64, gap = 12;
+        for (int i = 0; i < 12; ++i) {
+            int row = i / 3, col = i % 3;
+            if (point_in_rect(x, y,
+                              rx + col * (key_w + gap),
+                              key_y + row * (key_h + gap), key_w, key_h))
+                return i + 1;
+        }
+        int done_y = key_y + 4 * key_h + 3 * gap + 16;
+        if (point_in_rect(x, y, rx, done_y, 3 * key_w + 2 * gap, key_h))
+            return 15;
+    } else {
+        int button_w = (rw - 20) / 2;
+        if (point_in_rect(x, y, rx, action_y, button_w, 80))
+            return 13;
+        if (point_in_rect(x, y, rx + button_w + 20, action_y, button_w, 80))
+            return 14;
+        if (point_in_rect(x, y, rx, action_y + 96, rw, 60))
+            return 16;
+    }
+    return -1;
+}
+
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path, ChiakiLog *log)
+                             const char *config_path, ChiakiLog *log,
+                             const char *initial_message,
+                             InputContext *input_ctx)
 {
     (void)log;
 
@@ -1375,12 +1485,15 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     int  focus   = 0;
     bool editing = false;
     char msg[256] = {0};
+    if (initial_message && initial_message[0])
+        snprintf(msg, sizeof(msg), "%s", initial_message);
 
     /* Start with Connect focused if already ready */
     if (ui_valid_ipv4(ip) && ui_has_keys(cfg))
         focus = 14;
 
     SDL_StartTextInput();
+    int stick_x = 0, stick_y = 0;
 
     while (1) {
         /* Build lightweight debug status string */
@@ -1393,12 +1506,13 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
             (cfg && cfg->rp_key_b64) ? "OK" : "NO",
             (cfg && cfg->psn_refresh_token) ? "OK" : "none");
 
-        bool has_keys   = ui_has_keys(cfg);
-        bool can_import = ui_valid_ipv4(ip);
-        bool can_connect= ui_valid_ipv4(ip) && has_keys;
+        bool has_keys    = ui_has_keys(cfg);
+        bool has_valid_ip = ui_valid_ipv4(ip);
+        bool can_connect = has_valid_ip && has_keys;
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
+            input_handle_event(input_ctx, &ev);
             if (ev.type == SDL_QUIT) return UI_RESULT_QUIT;
 
             if (ev.type == SDL_KEYDOWN) {
@@ -1406,10 +1520,19 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
 
                 /* Back key: close keypad if open, otherwise exit launcher */
                 if (sym == SDLK_AC_HOME) return UI_RESULT_QUIT;
-                if (sym == SDLK_ESCAPE || sym == WEBOS_KEY_BACK || sym == WEBOS_KEY_RED) {
+                if (webos_event_is_back_or_red(&ev.key)) {
                     if (editing) { editing = false; focus = 0; continue; }
                     return UI_RESULT_QUIT;
                 }
+
+                /* Magic Remote number keys edit the IP regardless of focus. */
+                bool direct_ip_key =
+                    (sym >= SDLK_0 && sym <= SDLK_9) ||
+                    (sym >= SDLK_KP_0 && sym <= SDLK_KP_9) ||
+                    sym == SDLK_PERIOD || sym == SDLK_KP_PERIOD ||
+                    sym == SDLK_BACKSPACE;
+                if (direct_ip_key && !editing)
+                    focus = 0;
 
                 /* Navigation */
                 if (sym == SDLK_UP) {
@@ -1495,11 +1618,11 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         editing = true; focus = 1;
                     } else if (!editing && focus == 13) {
                         /* Import Config */
-                        if (!ui_valid_ipv4(ip)) {
-                            snprintf(msg, sizeof(msg), "Enter a valid PS5 IP address first.");
+                        if (ip[0] && !ui_valid_ipv4(ip)) {
+                            snprintf(msg, sizeof(msg), "Clear the IP field or enter a valid address.");
                             focus = 0; continue;
                         }
-                        if (!ui_write_host(config_path, ip)) {
+                        if (ip[0] && !ui_write_host(config_path, ip)) {
                             snprintf(msg, sizeof(msg), "Failed to write host to config.json");
                             continue;
                         }
@@ -1517,13 +1640,19 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                             snprintf(msg, sizeof(msg), "Import failed: could not write config.json.");
                             break;
                         case CI_SUCCESS:
-                        case CI_SUCCESS_NEEDS_HOST:
-                            snprintf(msg, sizeof(msg), "Import OK.  Press Connect.");
+                            snprintf(msg, sizeof(msg), "Import OK. PS5 IP loaded. Press Connect.");
                             ui_reload_cfg(cfg, config_path);
                             if (cfg && cfg->host && cfg->host[0])
                                 snprintf(ip, sizeof(ip), "%s", cfg->host);
                             if (ui_has_keys(cfg) && ui_valid_ipv4(ip))
                                 focus = 14;
+                            break;
+                        case CI_SUCCESS_NEEDS_HOST:
+                            snprintf(msg, sizeof(msg), "Keys imported. Enter the PS5 IP address.");
+                            ui_reload_cfg(cfg, config_path);
+                            if (cfg && cfg->host && cfg->host[0])
+                                snprintf(ip, sizeof(ip), "%s", cfg->host);
+                            focus = 0;
                             break;
                         default:
                             snprintf(msg, sizeof(msg), "Import complete.");
@@ -1532,7 +1661,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else if (!editing && focus == 16) {
                         /* Settings — drains Back events internally before returning */
-                        ui_run_settings(renderer, cfg, config_path);
+                        ui_run_settings(renderer, cfg, config_path, input_ctx);
                         ui_reload_cfg(cfg, config_path);
                         if (cfg && cfg->host && cfg->host[0])
                             snprintf(ip, sizeof(ip), "%s", cfg->host);
@@ -1579,16 +1708,32 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                 else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) fake_sym = SDLK_RIGHT;
                 else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_A)          fake_sym = SDLK_RETURN;
                 if (fake_sym) {
-                    SDL_Event fake; memset(&fake, 0, sizeof(fake));
-                    fake.type = SDL_KEYDOWN; fake.key.keysym.sym = fake_sym;
-                    SDL_PushEvent(&fake);
+                    push_ui_key(fake_sym);
+                }
+            } else if (ev.type == SDL_CONTROLLERAXISMOTION) {
+                SDL_Keycode key = stick_nav_key(&ev.caxis, &stick_x, &stick_y);
+                if (key) push_ui_key(key);
+            } else if (ev.type == SDL_MOUSEMOTION) {
+                int x, y;
+                pointer_to_ui(renderer, ev.motion.x, ev.motion.y, &x, &y);
+                int hovered = setup_focus_at(x, y, editing);
+                if (hovered >= 0) focus = hovered;
+            } else if (ev.type == SDL_MOUSEBUTTONDOWN &&
+                       ev.button.button == SDL_BUTTON_LEFT) {
+                int x, y;
+                pointer_to_ui(renderer, ev.button.x, ev.button.y, &x, &y);
+                int clicked = setup_focus_at(x, y, editing);
+                if (clicked >= 0) {
+                    focus = clicked;
+                    push_ui_key(SDLK_RETURN);
                 }
             }
         }
 
         render_setup_screen(renderer, status, ip, focus, msg,
-                             has_keys, can_import, can_connect, editing);
+                             has_keys, has_valid_ip, can_connect, editing);
         SDL_RenderPresent(renderer);
+        input_pump(input_ctx);
         SDL_Delay(16);
     }
 }

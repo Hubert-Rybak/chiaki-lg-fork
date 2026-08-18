@@ -1,552 +1,681 @@
 #include "input.h"
 #include "app_log.h"
+#include "dualsense.h"
+#include "webos_keys.h"
 
+#include <limits.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <errno.h>
-
-#include <sys/ioctl.h>
-#include <sys/select.h>
 #include <time.h>
-#include <linux/input.h>
 
-// ── Fallback defines for old kernel headers (pre-3.16 webOS sysroot) ──────────
-// These gamepad layout aliases were added in Linux 3.16.
-// The webOS toolchain sysroot ships with older headers that only have BTN_A/B/X/Y.
-#ifndef BTN_SOUTH
-#define BTN_SOUTH    0x130   /* BTN_A  — Cross / A  */
-#endif
-#ifndef BTN_EAST
-#define BTN_EAST     0x131   /* BTN_B  — Circle / B */
-#endif
-#ifndef BTN_NORTH
-#define BTN_NORTH    0x133   /* BTN_X  — Square / X     (confusingly, kernel maps Xbox-X to NORTH) */
-#endif
-#ifndef BTN_WEST
-#define BTN_WEST     0x134   /* BTN_Y  — Triangle / Y   (confusingly, kernel maps Xbox-Y to WEST)  */
-#endif
-#ifndef BTN_DPAD_UP
-#define BTN_DPAD_UP    0x220
-#define BTN_DPAD_DOWN  0x221
-#define BTN_DPAD_LEFT  0x222
-#define BTN_DPAD_RIGHT 0x223
-#endif
-#ifndef BTN_RECORD
-#define BTN_RECORD     0x167   /* Xbox Series X|S capture/share button */
-#endif
+#define CHORD_WINDOW_MS 100u
+#define HAPTIC_HOLD_MS   50u
+#define HAPTIC_RUMBLE_MIN_STRENGTH 100u
 
-#include <chiaki/controller.h>
-
-// ── webOS magic key codes (TV remote via SDL_KEYDOWN) ─────────────────────────
-#define WEBOS_KEY_UP        1073741906
-#define WEBOS_KEY_DOWN      1073741905
-#define WEBOS_KEY_LEFT      1073741904
-#define WEBOS_KEY_RIGHT     1073741903
-#define WEBOS_KEY_OK        13
-#define WEBOS_KEY_BACK      1073742094
-#define WEBOS_KEY_RED       403
-#define WEBOS_KEY_GREEN     404
-#define WEBOS_KEY_YELLOW    405
-#define WEBOS_KEY_BLUE      406
-
-// ── Evdev bit-test helper ──────────────────────────────────────────────────────
-#define EVDEV_BITS_TEST(arr, bit) \
-    (((arr)[(bit) / 8]) & (1 << ((bit) % 8)))
-
-// ── Per-device state ───────────────────────────────────────────────────────────
-#define MAX_GAMEPADS 4
-
-// ── Touchpad chord: Select+Start → Touchpad (for Xbox controllers) ──────────
-// When Select or Start is pressed alone, we defer emitting SHARE/OPTIONS for
-// up to CHORD_WINDOW_MS to see if the other button follows.  If both arrive
-// within the window → emit TOUCHPAD instead.  BTN_RECORD (Xbox Series capture
-// button) maps directly to TOUCHPAD with no deferral.
-#define CHORD_WINDOW_MS 100
-
-typedef struct {
-    bool            select_held;    // physical Select is currently down
-    bool            start_held;     // physical Start is currently down
-    bool            chord_active;   // chord detected → TOUCHPAD is pressed
-    uint16_t        pending_btn;    // BTN_SELECT or BTN_START (0 = none)
-    struct timespec pending_ts;     // when the pending button was pressed
-    uint32_t        tap_pending;    // chiaki button bit needing immediate release after tap
-} ChordState;
-
-typedef struct {
-    int  fd;
-    char path[64];
-    int  abs_min[ABS_CNT];
-    int  abs_max[ABS_CNT];
-    ChordState chord;
-} GamepadDev;
+typedef enum {
+    CHORD_NONE = 0,
+    CHORD_BACK,
+    CHORD_START,
+} PendingChordButton;
 
 struct InputContext {
+    pthread_mutex_t mutex;
     ChiakiControllerState state;
-    pthread_mutex_t       state_mutex;
-
-    GamepadDev    pads[MAX_GAMEPADS];
-    int           num_pads;
-
-    pthread_t     reader_thread;
-    volatile bool running;
-
     ChiakiSession *session;
+
+    SDL_GameController *controller;
+    SDL_JoystickID instance_id;
+    bool is_dualsense;
+    DualSenseFeedback *dualsense_feedback;
+
+    bool back_held;
+    bool start_held;
+    bool chord_active;
+    PendingChordButton chord_pending;
+    uint32_t chord_started_ms;
+
+    uint16_t base_rumble_left;
+    uint16_t base_rumble_right;
+    uint16_t haptic_rumble_left;
+    uint16_t haptic_rumble_right;
+    uint64_t haptic_until_ms;
+    uint16_t last_rumble_left;
+    uint16_t last_rumble_right;
+    bool last_rumble_valid;
+    bool rumble_error_logged;
+
+    float rumble_multiplier;
+    bool haptics_enabled;
+    bool triggers_enabled;
+    int haptic_intensity;
+    int trigger_intensity;
+
+    bool led_pending;
+    uint8_t led[3];
+    bool player_index_pending;
+    int player_index;
 };
 
-// ── Normalize evdev ABS value → int16 ─────────────────────────────────────────
-static int16_t normalize_axis(int val, int min, int max)
+static uint64_t monotonic_ms(void)
 {
-    if (max == min) return 0;
-    int32_t scaled = (int32_t)(((int64_t)(val - min) * 65534) / (max - min)) - 32767;
-    if (scaled >  32767) scaled =  32767;
-    if (scaled < -32768) scaled = -32768;
-    return (int16_t)scaled;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-// ── Monotonic clock helper ─────────────────────────────────────────────────────
-static void get_monotonic(struct timespec *ts)
+static bool name_contains(const char *name, const char *needle)
 {
-    clock_gettime(CLOCK_MONOTONIC, ts);
-}
-
-static long ms_elapsed(const struct timespec *from)
-{
-    struct timespec now;
-    get_monotonic(&now);
-    return (now.tv_sec - from->tv_sec) * 1000L +
-           (now.tv_nsec - from->tv_nsec) / 1000000L;
-}
-
-// ── Flush a deferred chord-pending button as its normal mapping ───────────────
-static void chord_flush_pending(ChiakiControllerState *st, ChordState *ch)
-{
-    if (ch->pending_btn == BTN_SELECT) {
-        st->buttons |= CHIAKI_CONTROLLER_BUTTON_SHARE;
-        app_log("[INPUT] Chord timeout — flushing Select as Share\n");
-    } else if (ch->pending_btn == BTN_START) {
-        st->buttons |= CHIAKI_CONTROLLER_BUTTON_OPTIONS;
-        app_log("[INPUT] Chord timeout — flushing Start as Options\n");
+    if (!name || !needle) return false;
+    size_t n = strlen(needle);
+    for (const char *p = name; *p; ++p) {
+        size_t i = 0;
+        while (i < n && p[i]) {
+            char a = p[i], b = needle[i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) break;
+            ++i;
+        }
+        if (i == n) return true;
     }
-    ch->pending_btn = 0;
+    return false;
 }
 
-// ── Map evdev EV_KEY → chiaki button (with Select+Start chord detection) ─────
-// Returns true if state was modified, false otherwise.
-static bool apply_key_event(ChiakiControllerState *st, GamepadDev *pad,
-                            uint16_t code, int32_t val)
+static bool controller_is_dualsense(SDL_GameController *controller)
 {
-    bool pressed = (val != 0);
-    ChordState *ch = &pad->chord;
-
-    // ── BTN_RECORD: Xbox Series capture button → Touchpad (direct, no chord) ─
-    if (code == BTN_RECORD) {
-        if (pressed) st->buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-        else         st->buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+    if (!controller) return false;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    if (SDL_GameControllerGetType(controller) == SDL_CONTROLLER_TYPE_PS5)
         return true;
+#endif
+    const char *name = SDL_GameControllerName(controller);
+    if (name_contains(name, "dualsense") || name_contains(name, "ps5 controller"))
+        return true;
+#if SDL_VERSION_ATLEAST(2, 0, 6)
+    Uint16 vendor = SDL_GameControllerGetVendor(controller);
+    Uint16 product = SDL_GameControllerGetProduct(controller);
+    if (vendor == 0x054c && (product == 0x0ce6 || product == 0x0df2))
+        return true;
+#endif
+    return false;
+}
+
+static void send_state(InputContext *ctx)
+{
+    ChiakiControllerState state;
+    ChiakiSession *session;
+    pthread_mutex_lock(&ctx->mutex);
+    state = ctx->state;
+    session = ctx->session;
+    pthread_mutex_unlock(&ctx->mutex);
+    if (session)
+        chiaki_session_set_controller_state(session, &state);
+}
+
+static uint8_t normalize_trigger(Sint16 value)
+{
+    if (value <= 0) return 0;
+    return (uint8_t)(((uint32_t)(uint16_t)value * 255u) / 32767u);
+}
+
+static uint32_t controller_button_bit(Uint8 button)
+{
+    switch ((SDL_GameControllerButton)button) {
+    case SDL_CONTROLLER_BUTTON_A:             return CHIAKI_CONTROLLER_BUTTON_CROSS;
+    case SDL_CONTROLLER_BUTTON_B:             return CHIAKI_CONTROLLER_BUTTON_MOON;
+    case SDL_CONTROLLER_BUTTON_X:             return CHIAKI_CONTROLLER_BUTTON_BOX;
+    case SDL_CONTROLLER_BUTTON_Y:             return CHIAKI_CONTROLLER_BUTTON_PYRAMID;
+    case SDL_CONTROLLER_BUTTON_GUIDE:         return CHIAKI_CONTROLLER_BUTTON_PS;
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:     return CHIAKI_CONTROLLER_BUTTON_L3;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK:    return CHIAKI_CONTROLLER_BUTTON_R3;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return CHIAKI_CONTROLLER_BUTTON_L1;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return CHIAKI_CONTROLLER_BUTTON_R1;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:       return CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     return CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     return CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    return CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    case SDL_CONTROLLER_BUTTON_MISC1:
+    case SDL_CONTROLLER_BUTTON_TOUCHPAD:      return CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+#endif
+    default:                                  return 0;
+    }
+}
+
+static void close_controller(InputContext *ctx)
+{
+    if (!ctx->controller) return;
+
+    const char *name = SDL_GameControllerName(ctx->controller);
+    app_log("[INPUT] Closing controller: %s\n", name ? name : "unknown");
+    SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
+
+    pthread_mutex_lock(&ctx->mutex);
+    chiaki_controller_state_set_idle(&ctx->state);
+    ctx->back_held = false;
+    ctx->start_held = false;
+    ctx->chord_active = false;
+    ctx->chord_pending = CHORD_NONE;
+    ctx->is_dualsense = false;
+    ctx->last_rumble_valid = false;
+    DualSenseFeedback *feedback = ctx->dualsense_feedback;
+    ctx->dualsense_feedback = NULL;
+    pthread_mutex_unlock(&ctx->mutex);
+    send_state(ctx);
+
+    SDL_GameControllerClose(ctx->controller);
+    ctx->controller = NULL;
+    ctx->instance_id = -1;
+    dualsense_feedback_free(feedback);
+}
+
+static bool open_controller(InputContext *ctx, int device_index)
+{
+    if (ctx->controller || device_index < 0 ||
+        !SDL_IsGameController(device_index))
+        return false;
+
+    SDL_GameController *controller = SDL_GameControllerOpen(device_index);
+    if (!controller) {
+        app_log("[INPUT] SDL_GameControllerOpen(%d) failed: %s\n",
+                device_index, SDL_GetError());
+        return false;
     }
 
-    // ── Select / Start: chord detection for Touchpad ─────────────────────────
-    if (code == BTN_SELECT || code == BTN_START) {
-        bool is_select = (code == BTN_SELECT);
-
-        if (pressed) {
-            if (is_select) ch->select_held = true;
-            else           ch->start_held  = true;
-
-            // Check if the other button is already pending → chord!
-            bool other_pending = (is_select && ch->pending_btn == BTN_START) ||
-                                 (!is_select && ch->pending_btn == BTN_SELECT);
-            bool other_held    = is_select ? ch->start_held : ch->select_held;
-
-            if (other_pending || (other_held && ch->chord_active)) {
-                // Chord detected — clear any individual presses, set touchpad
-                st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_SHARE |
-                                 CHIAKI_CONTROLLER_BUTTON_OPTIONS);
-                st->buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-                ch->chord_active = true;
-                ch->pending_btn  = 0;
-                app_log("[INPUT] Chord detected: Select+Start → Touchpad\n");
-                return true;
-            }
-
-            // No chord yet — defer this button
-            ch->pending_btn = code;
-            get_monotonic(&ch->pending_ts);
-            return false;  // don't send state yet; wait for chord window
-        }
-        else {
-            // Release
-            if (is_select) ch->select_held = false;
-            else           ch->start_held  = false;
-
-            if (ch->chord_active) {
-                // Releasing one of the chord buttons → clear touchpad
-                if (!ch->select_held && !ch->start_held) {
-                    st->buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-                    ch->chord_active = false;
-                    app_log("[INPUT] Chord released: Touchpad cleared\n");
-                }
-                return true;
-            }
-
-            // If this button was still pending (quick tap+release before window),
-            // flush it as a press; caller will send an immediate release via tap_pending.
-            if (ch->pending_btn == code) {
-                uint32_t btn_bit = is_select ? CHIAKI_CONTROLLER_BUTTON_SHARE
-                                             : CHIAKI_CONTROLLER_BUTTON_OPTIONS;
-                st->buttons |= btn_bit;
-                ch->pending_btn  = 0;
-                ch->tap_pending  = btn_bit;  // signal immediate release needed
-                return true;
-            }
-
-            // Normal release (was already flushed as individual button)
-            if (is_select) st->buttons &= ~CHIAKI_CONTROLLER_BUTTON_SHARE;
-            else           st->buttons &= ~CHIAKI_CONTROLLER_BUTTON_OPTIONS;
-            return true;
-        }
+    SDL_Joystick *joystick = SDL_GameControllerGetJoystick(controller);
+    SDL_JoystickID instance = SDL_JoystickInstanceID(joystick);
+    if (instance < 0) {
+        app_log("[INPUT] Could not get controller instance: %s\n", SDL_GetError());
+        SDL_GameControllerClose(controller);
+        return false;
     }
 
-    // ── All other buttons: direct mapping ────────────────────────────────────
-    uint32_t btn = 0;
-    switch (code) {
-    case BTN_SOUTH:      btn = CHIAKI_CONTROLLER_BUTTON_CROSS;    break;
-    case BTN_EAST:       btn = CHIAKI_CONTROLLER_BUTTON_MOON;     break;
-    case BTN_NORTH:      btn = CHIAKI_CONTROLLER_BUTTON_BOX;      break;
-    case BTN_WEST:       btn = CHIAKI_CONTROLLER_BUTTON_PYRAMID;  break;
-    case BTN_TL:         btn = CHIAKI_CONTROLLER_BUTTON_L1;       break;
-    case BTN_TR:         btn = CHIAKI_CONTROLLER_BUTTON_R1;       break;
-    case BTN_TL2: /* fall-through */ case BTN_TR2: return false;
-    case BTN_MODE:       btn = CHIAKI_CONTROLLER_BUTTON_PS;       break;
-    case BTN_THUMBL:     btn = CHIAKI_CONTROLLER_BUTTON_L3;       break;
-    case BTN_THUMBR:     btn = CHIAKI_CONTROLLER_BUTTON_R3;       break;
-    case BTN_DPAD_UP:    btn = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;    break;
-    case BTN_DPAD_DOWN:  btn = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;  break;
-    case BTN_DPAD_LEFT:  btn = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;  break;
-    case BTN_DPAD_RIGHT: btn = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT; break;
-    default: return false;
-    }
+    ctx->controller = controller;
+    ctx->instance_id = instance;
+    bool is_dualsense = controller_is_dualsense(controller);
+    DualSenseFeedback *feedback = is_dualsense ? dualsense_feedback_new() : NULL;
 
-    if (pressed) st->buttons |= btn;
-    else         st->buttons &= ~btn;
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->is_dualsense = is_dualsense;
+    ctx->dualsense_feedback = feedback;
+    ctx->last_rumble_valid = false;
+    int combined_intensity =
+        (ctx->trigger_intensity < 0 ? 0xf0 : ctx->trigger_intensity) |
+        (ctx->haptic_intensity < 0 ? 0x0f : ctx->haptic_intensity);
+    pthread_mutex_unlock(&ctx->mutex);
+
+    if (feedback)
+        dualsense_feedback_set_intensity(feedback, (uint8_t)combined_intensity);
+
+    app_log_always("[INPUT] Controller opened: %s (instance=%d, DualSense=%s)\n",
+                   SDL_GameControllerName(controller) ? SDL_GameControllerName(controller) : "unknown",
+                   (int)instance,
+                   is_dualsense ? "yes" : "no");
     return true;
 }
 
-// ── Map evdev EV_ABS → chiaki sticks/triggers/dpad ────────────────────────────
-static void apply_abs_event(ChiakiControllerState *st, GamepadDev *pad,
-                             uint16_t code, int32_t val)
+static void open_first_controller(InputContext *ctx)
 {
-    int min = pad->abs_min[code];
-    int max = pad->abs_max[code];
+    if (ctx->controller) return;
+    int count = SDL_NumJoysticks();
+    for (int i = 0; i < count; ++i) {
+        if (open_controller(ctx, i))
+            return;
+    }
+    app_log("[INPUT] No SDL GameController found; Magic Remote remains available\n");
+}
 
-    // Xbox Wireless Controller on webOS HID driver maps axes differently from
-    // standard xpad. Confirmed via diagnostic logging:
-    //   ABS_X  (0) = left stick X,  range 0-65535
-    //   ABS_Y  (1) = left stick Y,  range 0-65535
-    //   ABS_Z  (2) = right stick X, range 0-65535  (NOT L2!)
-    //   ABS_RZ (5) = right stick Y, range 0-65535  (NOT R2!)
-    //   ABS_GAS   (9)  = L2 trigger, range 0-1023
-    //   ABS_BRAKE (10) = R2 trigger, range 0-1023
-    //   ABS_RX (3) and ABS_RY (4) are not used by this driver.
-    switch (code) {
-    case ABS_X:    st->left_x  = normalize_axis(val, min, max); break;
-    case ABS_Y:    st->left_y  = normalize_axis(val, min, max); break;
-    // Right stick — standard mapping (DualSense / DualShock via hid-sony)
-    case ABS_RX:   st->right_x = normalize_axis(val, min, max); break;
-    case ABS_RY:   st->right_y = normalize_axis(val, min, max); break;
-    // Right stick — Xbox Wireless via webOS HID driver uses ABS_Z/ABS_RZ for sticks
-    case ABS_Z:    st->right_x = normalize_axis(val, min, max); break;
-    case ABS_RZ:   st->right_y = normalize_axis(val, min, max); break;
-    // Triggers — Xbox Wireless via webOS HID uses ABS_GAS/ABS_BRAKE (range 0-1023)
-    case 9:  /* ABS_GAS   — R2 (swapped on webOS HID driver) */
-        if (max > min)
-            st->r2_state = (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-        break;
-    case 10: /* ABS_BRAKE — L2 (swapped on webOS HID driver) */
-        if (max > min)
-            st->l2_state = (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-        break;
-    case ABS_HAT0X:
-        st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT |
-                         CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT);
-        if (val < 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
-        if (val > 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
-        break;
-    case ABS_HAT0Y:
-        st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_UP |
-                         CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN);
-        if (val < 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
-        if (val > 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-        break;
-    default: break;
+static void handle_chord_button(InputContext *ctx, Uint8 button, bool pressed)
+{
+    bool is_back = button == SDL_CONTROLLER_BUTTON_BACK;
+    uint32_t individual = is_back ? CHIAKI_CONTROLLER_BUTTON_SHARE
+                                  : CHIAKI_CONTROLLER_BUTTON_OPTIONS;
+    uint32_t other_individual = is_back ? CHIAKI_CONTROLLER_BUTTON_OPTIONS
+                                        : CHIAKI_CONTROLLER_BUTTON_SHARE;
+    PendingChordButton own_pending = is_back ? CHORD_BACK : CHORD_START;
+    PendingChordButton other_pending = is_back ? CHORD_START : CHORD_BACK;
+    bool send_twice = false;
+    bool changed = false;
+
+    pthread_mutex_lock(&ctx->mutex);
+    if (pressed) {
+        if (is_back) ctx->back_held = true;
+        else         ctx->start_held = true;
+        bool other_held = is_back ? ctx->start_held : ctx->back_held;
+        if (ctx->chord_pending == other_pending || other_held) {
+            ctx->state.buttons &= ~(individual | other_individual);
+            ctx->state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+            ctx->chord_active = true;
+            ctx->chord_pending = CHORD_NONE;
+            changed = true;
+        } else {
+            ctx->chord_pending = own_pending;
+            ctx->chord_started_ms = SDL_GetTicks();
+        }
+    } else {
+        if (is_back) ctx->back_held = false;
+        else         ctx->start_held = false;
+        if (ctx->chord_active) {
+            if (!ctx->back_held && !ctx->start_held) {
+                ctx->state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+                ctx->chord_active = false;
+                changed = true;
+            }
+        } else if (ctx->chord_pending == own_pending) {
+            /* Preserve a quick tap by emitting a press followed by a release. */
+            ctx->state.buttons |= individual;
+            ctx->chord_pending = CHORD_NONE;
+            changed = true;
+            send_twice = true;
+        } else {
+            ctx->state.buttons &= ~individual;
+            changed = true;
+        }
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+
+    if (changed) send_state(ctx);
+    if (send_twice) {
+        pthread_mutex_lock(&ctx->mutex);
+        ctx->state.buttons &= ~individual;
+        pthread_mutex_unlock(&ctx->mutex);
+        send_state(ctx);
     }
 }
 
-// ── Evdev reader thread ────────────────────────────────────────────────────────
-static void *evdev_reader(void *arg)
+static void handle_controller_button(InputContext *ctx,
+                                     const SDL_ControllerButtonEvent *event)
 {
-    InputContext *ctx = (InputContext *)arg;
+    if (!ctx->controller || event->which != ctx->instance_id)
+        return;
+    bool pressed = event->state == SDL_PRESSED;
 
-    while (ctx->running) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        int maxfd = -1;
-
-        for (int i = 0; i < ctx->num_pads; i++) {
-            if (ctx->pads[i].fd >= 0) {
-                FD_SET(ctx->pads[i].fd, &rfds);
-                if (ctx->pads[i].fd > maxfd)
-                    maxfd = ctx->pads[i].fd;
-            }
-        }
-
-        if (maxfd < 0) { usleep(50000); continue; }
-
-        struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 }; // 20ms for chord responsiveness
-        int sel = select(maxfd + 1, &rfds, NULL, NULL, &tv);
-
-        // ── Check chord timeouts on every iteration (even if no events) ──────
-        for (int i = 0; i < ctx->num_pads; i++) {
-            ChordState *ch = &ctx->pads[i].chord;
-            if (ch->pending_btn && ms_elapsed(&ch->pending_ts) >= CHORD_WINDOW_MS) {
-                pthread_mutex_lock(&ctx->state_mutex);
-                chord_flush_pending(&ctx->state, ch);
-                ChiakiControllerState snap = ctx->state;
-                pthread_mutex_unlock(&ctx->state_mutex);
-                if (ctx->session)
-                    chiaki_session_set_controller_state(ctx->session, &snap);
-            }
-        }
-
-        if (sel <= 0) continue;
-
-        for (int i = 0; i < ctx->num_pads; i++) {
-            if (ctx->pads[i].fd < 0) continue;
-            if (!FD_ISSET(ctx->pads[i].fd, &rfds)) continue;
-
-            struct input_event ev;
-            ssize_t n = read(ctx->pads[i].fd, &ev, sizeof(ev));
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EINTR) continue;
-                app_log("[INPUT] Gamepad %s disconnected\n", ctx->pads[i].path);
-                close(ctx->pads[i].fd);
-                ctx->pads[i].fd = -1;
-                continue;
-            }
-            if (n != sizeof(ev)) continue;
-
-            bool changed = false;
-            pthread_mutex_lock(&ctx->state_mutex);
-
-            if      (ev.type == EV_KEY) { changed = apply_key_event(&ctx->state, &ctx->pads[i], ev.code, ev.value); }
-            else if (ev.type == EV_ABS) { apply_abs_event(&ctx->state, &ctx->pads[i], ev.code, ev.value); changed = true; }
-
-            ChiakiControllerState snap = ctx->state;
-            pthread_mutex_unlock(&ctx->state_mutex);
-
-            if (changed && ctx->session)
-                chiaki_session_set_controller_state(ctx->session, &snap);
-
-            // Handle deferred tap release: button was tapped+released while
-            // still pending — we sent the press above, now immediately release.
-            if (ctx->pads[i].chord.tap_pending) {
-                pthread_mutex_lock(&ctx->state_mutex);
-                ctx->state.buttons &= ~ctx->pads[i].chord.tap_pending;
-                ctx->pads[i].chord.tap_pending = 0;
-                ChiakiControllerState snap2 = ctx->state;
-                pthread_mutex_unlock(&ctx->state_mutex);
-                if (ctx->session)
-                    chiaki_session_set_controller_state(ctx->session, &snap2);
-            }
-        }
-    }
-
-    return NULL;
-}
-
-// ── Check if evdev node is a physical gamepad ──────────────────────────────────
-static bool is_gamepad(int fd, const char *name)
-{
-    // Skip the virtual LGE/LG mirrored devices that webOS hidd creates.
-    // These are system-managed views of the physical controller; hidd still
-    // intercepts B→Back / A→OK at the protocol level for these nodes.
-    // The physical evdev node (e.g., "Sony DualSense") is what we want.
-    if (strncmp(name, "LGE", 3) == 0 || strncmp(name, "LG ", 3) == 0) {
-        app_log("[INPUT] Ignoring virtual LG device: \"%s\"\n", name);
-        return false;
-    }
-
-    uint8_t keybits[(KEY_MAX + 7) / 8];
-    memset(keybits, 0, sizeof(keybits));
-    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits);
-
-    // Must have BTN_SOUTH (A/Cross) AND analog sticks (ABS_X+ABS_Y) to be a gamepad.
-    // Checking BTN_SOUTH alone lets through TV peripheral devices (IoT keypads,
-    // Bluetooth audio sources, etc.) that happen to have 0x130 set.
-    if (!EVDEV_BITS_TEST(keybits, BTN_SOUTH))
-        return false;
-
-    uint8_t absbits[(ABS_MAX + 7) / 8];
-    memset(absbits, 0, sizeof(absbits));
-    ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
-
-    bool has_sticks = EVDEV_BITS_TEST(absbits, ABS_X) && EVDEV_BITS_TEST(absbits, ABS_Y);
-    if (!has_sticks) {
-        app_log("[INPUT] Skipping \"%s\" - no analog sticks (ABS_X/Y)\n", name);
-        return false;
-    }
-    return true;
-}
-
-// ── Open and exclusively grab all physical gamepads ───────────────────────────
-static void open_gamepads(InputContext *ctx)
-{
-    ctx->num_pads = 0;
-    for (int i = 0; i < MAX_GAMEPADS; i++) {
-        ctx->pads[i].fd = -1;
-        ctx->pads[i].path[0] = '\0';
-        memset(&ctx->pads[i].chord, 0, sizeof(ChordState));
-    }
-
-    DIR *dir = opendir("/dev/input");
-    if (!dir) {
-        app_log("[INPUT] opendir(/dev/input) failed: %s\n", strerror(errno));
+    if (event->button == SDL_CONTROLLER_BUTTON_BACK ||
+        event->button == SDL_CONTROLLER_BUTTON_START) {
+        handle_chord_button(ctx, event->button, pressed);
         return;
     }
 
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL && ctx->num_pads < MAX_GAMEPADS) {
-        if (strncmp(ent->d_name, "event", 5) != 0) continue;
-
-        char path[64];
-        snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
-
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0) continue;
-
-        char devname[256] = {0};
-        ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname);
-
-        if (!is_gamepad(fd, devname)) { close(fd); continue; }
-
-        GamepadDev *pad = &ctx->pads[ctx->num_pads];
-
-        // Read axis ranges for proper normalization
-        for (int axis = 0; axis < ABS_CNT; axis++) {
-            struct input_absinfo info;
-            if (ioctl(fd, EVIOCGABS(axis), &info) == 0) {
-                pad->abs_min[axis] = info.minimum;
-                pad->abs_max[axis] = info.maximum;
-            }
-        }
-
-        // EVIOCGRAB: take exclusive ownership.
-        // Once grabbed, webOS's hidd daemon and Wayland compositor can no longer
-        // see events from this device — B→Back, A→OK, Guide→Home system
-        // interceptions are all suppressed.  Only our process receives events.
-        //
-        // Because SDL also opens /dev/input/event* for its joystick subsystem,
-        // SDL's fd will stop receiving events after our grab. That is intentional:
-        // we read and route events ourselves in evdev_reader(), completely
-        // bypassing SDL's SDL_CONTROLLERBUTTON path.
-        if (ioctl(fd, EVIOCGRAB, 1) < 0) {
-            app_log("[INPUT] EVIOCGRAB FAILED for \"%s\" %s: %s\n",
-                    devname, path, strerror(errno));
-            app_log("[INPUT] System button intercept (B=Back, A=OK) may still occur\n");
-        } else {
-            app_log("[INPUT] EVIOCGRAB OK — exclusive control of \"%s\" (%s)\n",
-                    devname, path);
-        }
-
-        snprintf(pad->path, sizeof(pad->path), "%s", path);
-        pad->fd = fd;
-        ctx->num_pads++;
-        app_log("[INPUT] Opened gamepad: \"%s\" @ %s\n", devname, path);
-    }
-    closedir(dir);
-
-    if (ctx->num_pads == 0)
-        app_log("[INPUT] No physical gamepads found — TV remote only\n");
-    else {
-        app_log("[INPUT] %d gamepad(s) grabbed exclusively\n", ctx->num_pads);
-        app_log("[INPUT] Touchpad: Select+Start chord (%dms window) + BTN_RECORD direct\n",
-                CHORD_WINDOW_MS);
-    }
+    uint32_t bit = controller_button_bit(event->button);
+    if (!bit) return;
+    pthread_mutex_lock(&ctx->mutex);
+    if (pressed) ctx->state.buttons |= bit;
+    else         ctx->state.buttons &= ~bit;
+    pthread_mutex_unlock(&ctx->mutex);
+    send_state(ctx);
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────────
+static void handle_controller_axis(InputContext *ctx,
+                                   const SDL_ControllerAxisEvent *event)
+{
+    if (!ctx->controller || event->which != ctx->instance_id)
+        return;
+
+    pthread_mutex_lock(&ctx->mutex);
+    switch ((SDL_GameControllerAxis)event->axis) {
+    case SDL_CONTROLLER_AXIS_LEFTX:        ctx->state.left_x = event->value; break;
+    case SDL_CONTROLLER_AXIS_LEFTY:        ctx->state.left_y = event->value; break;
+    case SDL_CONTROLLER_AXIS_RIGHTX:       ctx->state.right_x = event->value; break;
+    case SDL_CONTROLLER_AXIS_RIGHTY:       ctx->state.right_y = event->value; break;
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  ctx->state.l2_state = normalize_trigger(event->value); break;
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: ctx->state.r2_state = normalize_trigger(event->value); break;
+    default:
+        pthread_mutex_unlock(&ctx->mutex);
+        return;
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+    send_state(ctx);
+}
+
+static void handle_remote_key(InputContext *ctx, const SDL_KeyboardEvent *event)
+{
+    SDL_Keycode key = event->keysym.sym;
+    bool pressed = event->state == SDL_PRESSED;
+    uint32_t button = 0;
+    if      (key == SDLK_UP)     button = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+    else if (key == SDLK_DOWN)   button = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+    else if (key == SDLK_LEFT)   button = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+    else if (key == SDLK_RIGHT)  button = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+    else if (key == SDLK_RETURN || key == SDLK_KP_ENTER)
+                                 button = CHIAKI_CONTROLLER_BUTTON_CROSS;
+    else if (key == WEBOS_KEY_GREEN_IR)
+                                 button = CHIAKI_CONTROLLER_BUTTON_CROSS;
+    else if (key == WEBOS_KEY_BLUE_IR)
+                                 button = CHIAKI_CONTROLLER_BUTTON_OPTIONS;
+    else if (key == WEBOS_KEY_YELLOW_IR)
+                                 button = CHIAKI_CONTROLLER_BUTTON_PYRAMID;
+    else return;
+
+    pthread_mutex_lock(&ctx->mutex);
+    if (!ctx->session) {
+        pthread_mutex_unlock(&ctx->mutex);
+        return;
+    }
+    if (pressed) ctx->state.buttons |= button;
+    else         ctx->state.buttons &= ~button;
+    pthread_mutex_unlock(&ctx->mutex);
+    send_state(ctx);
+}
 
 InputContext *input_init(void)
 {
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
-
+    pthread_mutex_init(&ctx->mutex, NULL);
     chiaki_controller_state_set_idle(&ctx->state);
-    pthread_mutex_init(&ctx->state_mutex, NULL);
-    ctx->running = true;
-    ctx->session = NULL;
-
-    open_gamepads(ctx);
-
-    pthread_create(&ctx->reader_thread, NULL, evdev_reader, ctx);
+    ctx->instance_id = -1;
+    ctx->rumble_multiplier = 1.0f;
+    ctx->haptics_enabled = true;
+    ctx->triggers_enabled = true;
+    ctx->haptic_intensity = 0x00;
+    ctx->trigger_intensity = 0x00;
+    SDL_version linked;
+    SDL_GetVersion(&linked);
+    app_log_always("[INPUT] SDL runtime %u.%u.%u; standardized GameController input enabled\n",
+                   linked.major, linked.minor, linked.patch);
+    SDL_GameControllerEventState(SDL_ENABLE);
+    open_first_controller(ctx);
     return ctx;
 }
 
 void input_set_session(InputContext *ctx, ChiakiSession *session)
 {
-    if (ctx) ctx->session = session;
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->session = session;
+    /* UI controller events must never leak held buttons into a new stream. */
+    chiaki_controller_state_set_idle(&ctx->state);
+    ctx->back_held = false;
+    ctx->start_held = false;
+    ctx->chord_active = false;
+    ctx->chord_pending = CHORD_NONE;
+    if (!session) {
+        ctx->base_rumble_left = 0;
+        ctx->base_rumble_right = 0;
+        ctx->haptic_rumble_left = 0;
+        ctx->haptic_rumble_right = 0;
+        ctx->haptic_until_ms = 0;
+        ctx->last_rumble_valid = false;
+    }
+    DualSenseFeedback *feedback = ctx->dualsense_feedback;
+    pthread_mutex_unlock(&ctx->mutex);
+
+    if (!session) {
+        if (ctx->controller)
+            SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
+        dualsense_feedback_release(feedback);
+    } else {
+        send_state(ctx);
+    }
+}
+
+void input_handle_event(InputContext *ctx, const SDL_Event *event)
+{
+    if (!ctx || !event) return;
+    switch (event->type) {
+    case SDL_CONTROLLERDEVICEADDED:
+        if (!ctx->controller)
+            open_controller(ctx, event->cdevice.which);
+        break;
+    case SDL_CONTROLLERDEVICEREMOVED:
+        if (ctx->controller && event->cdevice.which == ctx->instance_id) {
+            close_controller(ctx);
+            open_first_controller(ctx);
+        }
+        break;
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP:
+        handle_controller_button(ctx, &event->cbutton);
+        break;
+    case SDL_CONTROLLERAXISMOTION:
+        handle_controller_axis(ctx, &event->caxis);
+        break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        handle_remote_key(ctx, &event->key);
+        break;
+    default:
+        break;
+    }
+}
+
+static uint16_t scale_rumble(uint8_t value, float multiplier)
+{
+    float scaled = (float)value * 257.0f * multiplier;
+    if (scaled <= 0.0f) return 0;
+    if (scaled >= 65535.0f) return UINT16_MAX;
+    return (uint16_t)scaled;
+}
+
+static uint8_t player_led_pattern(uint8_t player_index)
+{
+    static const uint8_t patterns[] = { 0x04, 0x0a, 0x15, 0x1b, 0x1f };
+    return player_index < sizeof(patterns) ? patterns[player_index] : 0x1f;
+}
+
+void input_handle_session_event(InputContext *ctx, const ChiakiEvent *event)
+{
+    if (!ctx || !event) return;
+
+    pthread_mutex_lock(&ctx->mutex);
+    DualSenseFeedback *feedback = ctx->dualsense_feedback;
+    switch (event->type) {
+    case CHIAKI_EVENT_RUMBLE: {
+        ctx->base_rumble_left = event->rumble.left;
+        ctx->base_rumble_right = event->rumble.right;
+        break;
+    }
+    case CHIAKI_EVENT_LED_COLOR:
+        memcpy(ctx->led, event->led_state, sizeof(ctx->led));
+        ctx->led_pending = true;
+        if (feedback)
+            dualsense_feedback_set_lightbar(feedback,
+                event->led_state[0], event->led_state[1], event->led_state[2]);
+        break;
+    case CHIAKI_EVENT_PLAYER_INDEX:
+        ctx->player_index = event->player_index;
+        ctx->player_index_pending = true;
+        if (feedback)
+            dualsense_feedback_set_player_leds(
+                feedback, player_led_pattern(event->player_index));
+        break;
+    case CHIAKI_EVENT_HAPTIC_INTENSITY:
+        switch (event->intensity) {
+        case Off:
+            ctx->haptic_intensity = -1;
+            ctx->rumble_multiplier = 0.0f;
+            ctx->haptics_enabled = false;
+            ctx->base_rumble_left = ctx->base_rumble_right = 0;
+            ctx->haptic_rumble_left = ctx->haptic_rumble_right = 0;
+            break;
+        case Weak:
+            ctx->haptic_intensity = 0x03;
+            ctx->rumble_multiplier = 0.33f;
+            ctx->haptics_enabled = true;
+            break;
+        case Medium:
+            ctx->haptic_intensity = 0x02;
+            ctx->rumble_multiplier = 0.5f;
+            ctx->haptics_enabled = true;
+            break;
+        case Strong:
+        default:
+            ctx->haptic_intensity = 0x00;
+            ctx->rumble_multiplier = 1.0f;
+            ctx->haptics_enabled = true;
+            break;
+        }
+        if (feedback) {
+            uint8_t intensity = (uint8_t)(
+                (ctx->trigger_intensity < 0 ? 0xf0 : ctx->trigger_intensity) |
+                (ctx->haptic_intensity < 0 ? 0x0f : ctx->haptic_intensity));
+            dualsense_feedback_set_intensity(feedback, intensity);
+        }
+        break;
+    case CHIAKI_EVENT_TRIGGER_INTENSITY:
+        switch (event->intensity) {
+        case Off:    ctx->trigger_intensity = -1;   ctx->triggers_enabled = false; break;
+        case Weak:   ctx->trigger_intensity = 0x90; ctx->triggers_enabled = true;  break;
+        case Medium: ctx->trigger_intensity = 0x60; ctx->triggers_enabled = true;  break;
+        case Strong:
+        default:     ctx->trigger_intensity = 0x00; ctx->triggers_enabled = true;  break;
+        }
+        if (feedback) {
+            uint8_t intensity = (uint8_t)(
+                (ctx->trigger_intensity < 0 ? 0xf0 : ctx->trigger_intensity) |
+                (ctx->haptic_intensity < 0 ? 0x0f : ctx->haptic_intensity));
+            dualsense_feedback_set_intensity(feedback, intensity);
+            if (!ctx->triggers_enabled) {
+                const uint8_t clear[10] = {0};
+                dualsense_feedback_set_trigger_effects(feedback, 0, clear, 0, clear);
+            }
+        }
+        break;
+    case CHIAKI_EVENT_TRIGGER_EFFECTS:
+        if (feedback && ctx->triggers_enabled) {
+            dualsense_feedback_set_trigger_effects(
+                feedback,
+                event->trigger_effects.type_left, event->trigger_effects.left,
+                event->trigger_effects.type_right, event->trigger_effects.right);
+        }
+        break;
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+}
+
+static void haptics_header_cb(ChiakiAudioHeader *header, void *user)
+{
+    (void)header;
+    (void)user;
+}
+
+static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
+{
+    InputContext *ctx = user;
+    if (!ctx || !buf || buf_size < 4) return;
+
+    size_t frames = buf_size / 4;
+    uint64_t sum_left = 0, sum_right = 0;
+    for (size_t i = 0; i < frames; ++i) {
+        int16_t left, right;
+        memcpy(&left, buf + i * 4, sizeof(left));
+        memcpy(&right, buf + i * 4 + 2, sizeof(right));
+        sum_left += left < 0 ? (uint32_t)(-(int32_t)left) : (uint32_t)left;
+        sum_right += right < 0 ? (uint32_t)(-(int32_t)right) : (uint32_t)right;
+    }
+
+    uint32_t left = (uint32_t)((sum_left * 2u) / frames);
+    uint32_t right = (uint32_t)((sum_right * 2u) / frames);
+    if (left <= HAPTIC_RUMBLE_MIN_STRENGTH) left = 0;
+    if (right <= HAPTIC_RUMBLE_MIN_STRENGTH) right = 0;
+    if (left > UINT16_MAX) left = UINT16_MAX;
+    if (right > UINT16_MAX) right = UINT16_MAX;
+
+    pthread_mutex_lock(&ctx->mutex);
+    if (!ctx->haptics_enabled) {
+        left = right = 0;
+    } else {
+        left = (uint32_t)((float)left * ctx->rumble_multiplier);
+        right = (uint32_t)((float)right * ctx->rumble_multiplier);
+        if (left > UINT16_MAX) left = UINT16_MAX;
+        if (right > UINT16_MAX) right = UINT16_MAX;
+    }
+    ctx->haptic_rumble_left = (uint16_t)left;
+    ctx->haptic_rumble_right = (uint16_t)right;
+    ctx->haptic_until_ms = (left || right) ? monotonic_ms() + HAPTIC_HOLD_MS : 0;
+    pthread_mutex_unlock(&ctx->mutex);
+}
+
+ChiakiAudioSink input_make_haptics_sink(InputContext *ctx)
+{
+    ChiakiAudioSink sink;
+    memset(&sink, 0, sizeof(sink));
+    sink.user = ctx;
+    sink.header_cb = haptics_header_cb;
+    sink.frame_cb = haptics_frame_cb;
+    return sink;
+}
+
+void input_pump(InputContext *ctx)
+{
+    if (!ctx) return;
+
+    bool chord_changed = false;
+    pthread_mutex_lock(&ctx->mutex);
+    if (ctx->chord_pending != CHORD_NONE &&
+        (uint32_t)(SDL_GetTicks() - ctx->chord_started_ms) >= CHORD_WINDOW_MS) {
+        if (ctx->chord_pending == CHORD_BACK)
+            ctx->state.buttons |= CHIAKI_CONTROLLER_BUTTON_SHARE;
+        else
+            ctx->state.buttons |= CHIAKI_CONTROLLER_BUTTON_OPTIONS;
+        ctx->chord_pending = CHORD_NONE;
+        chord_changed = true;
+    }
+
+    uint64_t now = monotonic_ms();
+    float base_multiplier = ctx->is_dualsense ? 1.0f : ctx->rumble_multiplier;
+    uint16_t left = scale_rumble((uint8_t)ctx->base_rumble_left, base_multiplier);
+    uint16_t right = scale_rumble((uint8_t)ctx->base_rumble_right, base_multiplier);
+    if (ctx->haptic_until_ms > now) {
+        if (ctx->haptic_rumble_left > left) left = ctx->haptic_rumble_left;
+        if (ctx->haptic_rumble_right > right) right = ctx->haptic_rumble_right;
+    }
+    bool rumble_changed = !ctx->last_rumble_valid ||
+                          left != ctx->last_rumble_left ||
+                          right != ctx->last_rumble_right;
+    if (rumble_changed) {
+        ctx->last_rumble_left = left;
+        ctx->last_rumble_right = right;
+        ctx->last_rumble_valid = true;
+    }
+    bool led_pending = ctx->led_pending;
+    uint8_t led[3]; memcpy(led, ctx->led, sizeof(led));
+    ctx->led_pending = false;
+    bool player_pending = ctx->player_index_pending;
+    int player_index = ctx->player_index;
+    ctx->player_index_pending = false;
+    bool is_dualsense = ctx->is_dualsense;
+    pthread_mutex_unlock(&ctx->mutex);
+
+    if (chord_changed) send_state(ctx);
+    if (!ctx->controller) return;
+
+    if (rumble_changed) {
+        Uint32 duration = (left || right) ? 5000u : 0u;
+        if (SDL_GameControllerRumble(ctx->controller, left, right, duration) != 0) {
+            if (!ctx->rumble_error_logged) {
+                app_log("[INPUT] Controller rumble unavailable: %s\n", SDL_GetError());
+                ctx->rumble_error_logged = true;
+            }
+        } else {
+            ctx->rumble_error_logged = false;
+        }
+    }
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    /* DualSense LED writes use Luna: SDL's HIDAPI route is jailed on webOS. */
+    if (led_pending && !is_dualsense)
+        (void)SDL_GameControllerSetLED(ctx->controller, led[0], led[1], led[2]);
+#else
+    (void)led_pending; (void)led; (void)is_dualsense;
+#endif
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    if (player_pending && !is_dualsense)
+        SDL_GameControllerSetPlayerIndex(ctx->controller, player_index);
+#else
+    (void)player_pending; (void)player_index;
+#endif
 }
 
 void input_fini(InputContext *ctx)
 {
     if (!ctx) return;
-    ctx->running = false;
-    pthread_join(ctx->reader_thread, NULL);
-    for (int i = 0; i < ctx->num_pads; i++) {
-        if (ctx->pads[i].fd >= 0) {
-            ioctl(ctx->pads[i].fd, EVIOCGRAB, 0);
-            close(ctx->pads[i].fd);
-        }
-    }
-    pthread_mutex_destroy(&ctx->state_mutex);
+    input_set_session(ctx, NULL);
+    close_controller(ctx);
+    pthread_mutex_destroy(&ctx->mutex);
     free(ctx);
-}
-
-// ── TV remote handler (SDL keyboard events only) ───────────────────────────────
-// Gamepad events are handled entirely in evdev_reader() above.
-// This function only processes SDL_KEYDOWN/KEYUP from the TV remote.
-// WEBOS_KEY_BACK is intentionally absent — it exits the app (handled in main.c).
-void input_handle_event(SDL_Event *ev, InputContext *ctx, ChiakiSession *session)
-{
-    if (!ctx) return;
-    if (ev->type != SDL_KEYDOWN && ev->type != SDL_KEYUP) return;
-
-    bool pressed = (ev->type == SDL_KEYDOWN);
-    uint32_t btn = 0;
-    SDL_Keycode key = ev->key.keysym.sym;
-
-    if      (key == SDLK_UP    || (int)key == WEBOS_KEY_UP)    btn = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
-    else if (key == SDLK_DOWN  || (int)key == WEBOS_KEY_DOWN)  btn = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-    else if (key == SDLK_LEFT  || (int)key == WEBOS_KEY_LEFT)  btn = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
-    else if (key == SDLK_RIGHT || (int)key == WEBOS_KEY_RIGHT) btn = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
-    else if (key == SDLK_RETURN|| (int)key == WEBOS_KEY_OK)    btn = CHIAKI_CONTROLLER_BUTTON_CROSS;
-    else if ((int)key == WEBOS_KEY_RED)                        btn = CHIAKI_CONTROLLER_BUTTON_BOX;
-    else if ((int)key == WEBOS_KEY_GREEN)                      btn = CHIAKI_CONTROLLER_BUTTON_CROSS;
-    else if ((int)key == WEBOS_KEY_BLUE)                       btn = CHIAKI_CONTROLLER_BUTTON_OPTIONS;
-    else if ((int)key == WEBOS_KEY_YELLOW)                     btn = CHIAKI_CONTROLLER_BUTTON_PYRAMID;
-    else return;
-
-    pthread_mutex_lock(&ctx->state_mutex);
-    if (pressed) ctx->state.buttons |= btn;
-    else         ctx->state.buttons &= ~btn;
-    ChiakiControllerState snap = ctx->state;
-    pthread_mutex_unlock(&ctx->state_mutex);
-
-    chiaki_session_set_controller_state(session, &snap);
 }

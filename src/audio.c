@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "stats.h"
+#include "app_id.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +44,7 @@ static void audio_header_cb(ChiakiAudioHeader *header, void *user)
         .codec         = SS4S_AUDIO_OPUS,
         .numOfChannels = (int)header->channels,
         .sampleRate    = (int)header->rate,
-        .appName       = "org.homebrew.chiaki",
+        .appName       = CHIAKI_APP_ID,
     };
 
     int rc = SS4S_PlayerAudioOpen(ctx->player, &info);

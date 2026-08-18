@@ -39,9 +39,11 @@
 #include "ui.h"
 #include "stats.h"
 #include "config_import.h"
+#include "app_id.h"
+#include "root_feedback.h"
+#include "webos_keys.h"
 
-#define APP_DIR     "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki"
-#define CONFIG_PATH APP_DIR "/config.json"
+#define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -129,6 +131,9 @@ static void log_cb(ChiakiLogLevel level, const char *msg, void *user)
 
 static void session_event_cb(ChiakiEvent *event, void *user)
 {
+    InputContext *input_ctx = user;
+    input_handle_session_event(input_ctx, event);
+
     switch (event->type)
     {
     case CHIAKI_EVENT_CONNECTED:
@@ -140,6 +145,12 @@ static void session_event_cb(ChiakiEvent *event, void *user)
             (const uint8_t *)"0000", 4);
         break;
     case CHIAKI_EVENT_RUMBLE:
+    case CHIAKI_EVENT_TRIGGER_EFFECTS:
+    case CHIAKI_EVENT_LED_COLOR:
+    case CHIAKI_EVENT_PLAYER_INDEX:
+    case CHIAKI_EVENT_HAPTIC_INTENSITY:
+    case CHIAKI_EVENT_TRIGGER_INTENSITY:
+        /* Applied asynchronously by input_handle_session_event(). */
         break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
@@ -179,6 +190,60 @@ static void sig_handler(int sig)
 }
 
 // ── Wakeup ────────────────────────────────────────────────────────────────────
+
+static bool host_port_ready(const char *host, uint16_t port, int timeout_ms)
+{
+    if (!host || !host[0] || timeout_ms < 0)
+        return false;
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &address.sin_addr) != 1)
+        return false;
+
+    int probe = socket(AF_INET, SOCK_STREAM, 0);
+    if (probe < 0)
+        return false;
+
+    int flags = fcntl(probe, F_GETFL, 0);
+    if (flags < 0 || fcntl(probe, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(probe);
+        return false;
+    }
+
+    int rc = connect(probe, (struct sockaddr *)&address, sizeof(address));
+    if (rc == 0) {
+        close(probe);
+        return true;
+    }
+    if (errno != EINPROGRESS) {
+        close(probe);
+        return false;
+    }
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(probe, &write_fds);
+    struct timeval timeout = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    rc = select(probe + 1, NULL, &write_fds, NULL, &timeout);
+    if (rc <= 0) {
+        close(probe);
+        return false;
+    }
+
+    int socket_error = 0;
+    socklen_t error_len = sizeof(socket_error);
+    bool ready = getsockopt(probe, SOL_SOCKET, SO_ERROR,
+                            &socket_error, &error_len) == 0 &&
+                 socket_error == 0;
+    close(probe);
+    return ready;
+}
 
 static void do_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
@@ -225,7 +290,7 @@ static void setup_ssl_ca_bundle(void)
         "/etc/pki/tls/certs/ca-bundle.crt",
         "/etc/ssl/cert.pem",
         "/usr/share/ca-certificates/ca-certificates.crt",
-        "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/cacert.pem",
+        CHIAKI_APP_DIR "/cacert.pem",
         NULL
     };
     const char *existing = getenv("CURL_CA_BUNDLE");
@@ -320,7 +385,7 @@ static char *psn_refresh_access_token(const char *refresh_token)
         token += 3;
         app_log_always("[PSN] Stripped 'v3.' prefix from refresh token\n");
     }
-    app_log_always("[PSN] Refresh token: %.8s... (len=%zu)\n", token, strlen(token));
+    app_log_always("[PSN] Refresh token available (len=%zu)\n", strlen(token));
 
     char *enc_token = curl_easy_escape(curl, token, 0);
     char *enc_scope = curl_easy_escape(curl, PSN_SCOPE, 0);
@@ -354,7 +419,7 @@ static char *psn_refresh_access_token(const char *refresh_token)
     }
     app_log_always("[PSN] Token endpoint HTTP %ld (%zu bytes)\n", http_code, resp.len);
     if (http_code != 200) {
-        app_log_always("[PSN] Token refresh failed: %.512s\n", resp.buf ? resp.buf : "");
+        app_log_always("[PSN] Token refresh failed (HTTP %ld)\n", http_code);
         free(resp.buf);
         return NULL;
     }
@@ -405,8 +470,8 @@ static char *psn_list_devices(const char *access_token)
         free(resp.buf);
         return NULL;
     }
-    app_log_always("[PSN] list_devices HTTP %ld (%zu bytes): %.1024s\n",
-            http_code, resp.len, resp.buf ? resp.buf : "");
+    app_log_always("[PSN] list_devices HTTP %ld (%zu bytes)\n",
+            http_code, resp.len);
 
     if (http_code != 200 || !resp.buf) {
         free(resp.buf);
@@ -469,7 +534,7 @@ static char *psn_list_devices(const char *access_token)
     free(resp.buf);
 
     if (duid)
-        app_log_always("[PSN] Selected device duid=%s\n", duid);
+        app_log_always("[PSN] Selected a Remote Play-enabled device\n");
     else
         app_log_always("[PSN] No suitable device found\n");
     return duid;
@@ -524,7 +589,7 @@ static bool psn_decode_account_id(const char *b64, char *out, size_t out_sz)
 static void psn_make_client_duid(char *out, size_t out_sz)
 {
     // Simple hash of our app identity for the random portion
-    const char *seed = "org.homebrew.chiaki-webos-client-001";
+    const char *seed = CHIAKI_APP_ID "-webos-client-001";
     uint8_t hash[16] = {0};
     for (size_t i = 0; seed[i]; i++)
         hash[i % 16] ^= (uint8_t)seed[i];
@@ -579,8 +644,6 @@ static char *psn_create_session(const char *access_token, const char *account_id
         "}]}]}",
         push_uuid);
 
-    app_log_always("[PSN] Session create body: %s\n", body);
-
     CurlBuf resp = {0};
     curl_easy_setopt(curl, CURLOPT_URL, PSN_SESSION_URL);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -599,8 +662,8 @@ static char *psn_create_session(const char *access_token, const char *account_id
         free(resp.buf);
         return NULL;
     }
-    app_log_always("[PSN] Session create HTTP %ld (%zu bytes): %.1024s\n",
-            http_code, resp.len, resp.buf ? resp.buf : "");
+    app_log_always("[PSN] Session create HTTP %ld (%zu bytes)\n",
+            http_code, resp.len);
 
     if (http_code < 200 || http_code >= 300 || !resp.buf) {
         free(resp.buf);
@@ -636,12 +699,13 @@ static char *psn_create_session(const char *access_token, const char *account_id
     }
     free(resp.buf);
 
-    if (session_id)
-        app_log_always("[PSN] Session created: %s\n", session_id);
+    if (session_id) {
+        app_log_always("[PSN] Session created\n");
         if (out_member_device_uid && *out_member_device_uid)
-            app_log_always("[PSN] Session member deviceUniqueId: %s\n", *out_member_device_uid);
-    else
+            app_log_always("[PSN] Session member device ID received\n");
+    } else {
         app_log_always("[PSN] Could not parse sessionId from response\n");
+    }
     return session_id;
 }
 
@@ -684,8 +748,6 @@ static bool psn_start_session(const char *access_token,
         curl_easy_cleanup(curl);
         return false;
     }
-    app_log_always("[PSN] data1=%s data2=%s\n", data1_b64, data2_b64);
-
     char initial_params[1024];
     snprintf(initial_params, sizeof(initial_params),
             "{\\\"accountId\\\":%s,"
@@ -712,8 +774,6 @@ static bool psn_start_session(const char *access_token,
             "}",
             duid, initial_params);
 
-    app_log_always("[PSN] Session command body: %s\n", body);
-
     CurlBuf resp = {0};
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -729,8 +789,8 @@ static bool psn_start_session(const char *access_token,
         app_log_always("[PSN] Session command curl error: %s\n", curl_easy_strerror(rc));
 
     if (resp.buf && resp.len)
-        app_log_always("[PSN] Session command HTTP %ld (%zu bytes): %s\n",
-                       http_code, resp.len, resp.buf);
+        app_log_always("[PSN] Session command HTTP %ld (%zu bytes)\n",
+                       http_code, resp.len);
     else
         app_log_always("[PSN] Session command HTTP %ld (0 bytes)\n", http_code);
 
@@ -786,7 +846,7 @@ static void do_psn_wakeup(AppConfig *cfg, ChiakiLog *log)
         do_wakeup(cfg, log);
         return;
     }
-    app_log_always("[PSN] Account ID: %s\n", account_id);
+    app_log_always("[PSN] Account ID decoded\n");
 
     // Step 1: Refresh access token
     char *access_token = psn_refresh_access_token(cfg->psn_refresh_token);
@@ -808,7 +868,7 @@ static void do_psn_wakeup(AppConfig *cfg, ChiakiLog *log)
     // Step 3: Generate our client device UID
     char client_duid[128];
     psn_make_client_duid(client_duid, sizeof(client_duid));
-    app_log_always("[PSN] Client duid: %s\n", client_duid);
+    app_log_always("[PSN] Client device ID generated\n");
 
     // Step 4: Create Remote Play session on PSN
     char *session_id = psn_create_session(access_token, account_id, client_duid, NULL);
@@ -937,15 +997,29 @@ static bool should_reconnect(ChiakiQuitReason reason)
         return false;
 
 
-    // PS5 kicked us because another client connected (or session was stolen).
-    // Reconnecting immediately would loop forever; exit cleanly.
-    case CHIAKI_QUIT_REASON_SESSION_REQUEST_UNKNOWN:
-        app_log("[APP] PS5 requested session end (another client may have connected)\n");
-        return false;
-
     // Network / stream errors — worth a retry, unless PS5 went to Rest Mode.
     default:
         return !g_ps5_sleeping;
+    }
+}
+
+// Session-request failures happen before streaming starts. Return to the
+// launcher so the user can correct the host or console state instead of making
+// the process disappear or retrying forever.
+static const char *session_request_failure_message(ChiakiQuitReason reason)
+{
+    switch (reason) {
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_UNKNOWN:
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_CONNECTION_REFUSED:
+        return "Connection failed. Check PS5 IP and console status.";
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE:
+        return "Remote Play is already in use on the PS5.";
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_CRASH:
+        return "The PS5 Remote Play service reported an error.";
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_VERSION_MISMATCH:
+        return "PS5 protocol mismatch. Update the app and retry.";
+    default:
+        return NULL;
     }
 }
 
@@ -958,10 +1032,10 @@ int main(int argc, char *argv[])
     { struct rlimit rl = {0, 0}; setrlimit(RLIMIT_CORE, &rl); }
 
     /* ===== REQUIRED WEBOS SS4S ENV SETUP ===== */
-    chdir("/media/developer/apps/usr/palm/applications/org.homebrew.chiaki");
+    chdir(CHIAKI_APP_DIR);
     setenv("SS4S_CONFIG_FILE", "./lib/ss4s_modules.ini", 1);
     // SS4S_MODULE is set after config load — auto-detection picks ndl-webos4 or ndl-webos5.
-    setenv("SS4S_APP_ID",      "org.homebrew.chiaki",    1);
+    setenv("SS4S_APP_ID",      CHIAKI_APP_ID,    1);
     /* ========================================= */
 
     // Open log unconditionally first — once cfg is loaded we'll close it
@@ -987,6 +1061,10 @@ int main(int argc, char *argv[])
         config_path = argv[1];
 
     app_log("[APP] config_path = %s\n", config_path);
+
+    /* Rooted TVs can activate the bundled, strictly compatibility-gated
+     * DualSense driver and old-webOS Bluetooth correction through Homebrew. */
+    root_feedback_bootstrap();
 
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
@@ -1025,10 +1103,15 @@ int main(int argc, char *argv[])
     setup_ssl_ca_bundle();
 
     // ── SDL2 init ────────────────────────────────────────────────────────────
-    // We use direct evdev + EVIOCGRAB for the gamepad (in input.c), so we
-    // do NOT need SDL_INIT_GAMECONTROLLER.  The grab at the kernel level
-    // prevents webOS from seeing B→Back / A→OK / Guide→Home at all.
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
+    // webosbrew/SDL-webOS latches these access-policy hints when the window is
+    // created. They keep Back/Exit/Guide usable inside the app and prevent the
+    // launcher ribbon from covering the stream.
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -1079,9 +1162,7 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] SDL window created OK\n");
 
-    // We don't need SDL_SetWindowGrab for the gamepad because we use EVIOCGRAB
-    // directly on the evdev fd in input.c.  Window grab is still useful to keep
-    // the webOS compositor from stealing keyboard focus from the TV remote path.
+    // Keep Magic Remote keyboard focus attached to the fullscreen app.
     SDL_SetWindowGrab(g_window, SDL_TRUE);
 
     // Accelerated renderer — uses OpenGL ES on webOS, which respects the
@@ -1108,7 +1189,11 @@ int main(int argc, char *argv[])
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
 
-    SDL_ShowCursor(SDL_DISABLE);
+    InputContext *input_ctx = input_init();
+    if (!input_ctx)
+        app_log_always("[INPUT] Initialization failed; continuing without a controller\n");
+
+    SDL_ShowCursor(SDL_ENABLE);
 
     // ── Stats overlay state (toggled at runtime) ─────────────────────────────
     StatsOverlay stats_overlay;
@@ -1120,14 +1205,33 @@ int main(int argc, char *argv[])
     ChiakiLog chiaki_log;
     chiaki_log_init(&chiaki_log, cfg.log_level, log_cb, NULL);
 
+    // Discovery packets contain the wake credential in their verbose hex dump.
+    // Use a restricted logger for wakeup while retaining the selected level for
+    // the actual streaming session.
+    ChiakiLog wakeup_log;
+    chiaki_log_init(&wakeup_log,
+                    CHIAKI_LOG_WARNING | CHIAKI_LOG_ERROR,
+                    log_cb, NULL);
+
+    char launcher_message[256] = "";
+
     // ── Launcher UI (shown on every launch) ───────────────────────────────
 
+show_launcher:
+    g_session_ended = false;
+    g_quit_reason = CHIAKI_QUIT_REASON_NONE;
+    g_ps5_sleeping = false;
+    g_have_video_frame = false;
+
     app_log("[APP] Showing launcher UI\n");
+    SDL_ShowCursor(SDL_ENABLE);
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
     SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
-    UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log);
+    UIResult ui_result = ui_run_registration(
+        g_renderer, &cfg, config_path, &chiaki_log, launcher_message, input_ctx);
+    launcher_message[0] = '\0';
 
     // Back to transparent so NDL plane shows through during stream
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
@@ -1143,6 +1247,13 @@ int main(int argc, char *argv[])
 
     if (g_should_exit)
         goto cleanup_sdl;
+
+    SDL_ShowCursor(SDL_DISABLE);
+
+    // The launcher can update logging settings and reload cfg in place.
+    chiaki_log_init(&chiaki_log, cfg.log_level, log_cb, NULL);
+
+    bool return_to_launcher = false;
 
     // ── SS4S init ─────────────────────────────────────────────────────────────
     app_log("[APP] Initialising SS4S (module: %s)\n", cfg.ss4s_module);
@@ -1192,7 +1303,7 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] SS4S player opened\n");
 
-    // ── Video / Audio / Input init ────────────────────────────────────────────
+    // ── Video / Audio init ────────────────────────────────────────────────────
     // Determine codec once - used by both video_init (SS4S) and info.video_profile.codec (Chiaki).
     bool force_h264    = cfg.video_codec && strcmp(cfg.video_codec, "h264") == 0;
     bool want_h265_hdr = cfg.video_codec && strcmp(cfg.video_codec, "h265_hdr") == 0;
@@ -1237,13 +1348,12 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] audio_init OK\n");
 
-    InputContext *input_ctx = input_init();
-
     // ── Build connect info (done once, reused across reconnects) ──────────────
     ChiakiConnectInfo info;
     memset(&info, 0, sizeof(info));
     info.host = cfg.host;
     info.ps5  = cfg.ps5;
+    info.enable_dualsense = cfg.ps5;
 
     size_t decoded_len;
 
@@ -1253,6 +1363,9 @@ int main(int argc, char *argv[])
                              info.regist_key, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode registered_key\n");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "Registration key is invalid. Import config again.");
+        return_to_launcher = true;
         goto cleanup_session_ctx;
     }
     decoded_len = sizeof(info.morning);
@@ -1261,6 +1374,9 @@ int main(int argc, char *argv[])
                              info.morning, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode rp_key\n");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "Remote Play key is invalid. Import config again.");
+        return_to_launcher = true;
         goto cleanup_session_ctx;
     }
     uint8_t account_id_raw[8];
@@ -1270,6 +1386,9 @@ int main(int argc, char *argv[])
                              account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode psn_account_id\n");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "PSN account ID is invalid. Import config again.");
+        return_to_launcher = true;
         goto cleanup_session_ctx;
     }
     memcpy(&info.psn_account_id, account_id_raw, sizeof(info.psn_account_id));
@@ -1307,117 +1426,75 @@ int main(int argc, char *argv[])
         SDL_RenderPresent(g_renderer);
 
         // ── Wakeup ───────────────────────────────────────────────────────────
-        // Send wakeup on the first attempt only.  Poll until the PS5 becomes
-        // reachable (TCP connect to port 9295) rather than using a fixed delay
-        // so we connect the moment it is ready whether it was asleep or awake.
-        // Resend the wakeup packet every 5s in case the first UDP was lost.
+        // Send wakeup on the first attempt only. Check port 9295 first so an
+        // already-awake console does not receive a competing PSN cloud Remote
+        // Play command immediately before the local Chiaki session. If it is
+        // asleep, resend the local wake packet every 5s until it is reachable.
         if (cfg.wakeup && attempt == 1)
         {
-            if (cfg.psn_refresh_token && cfg.psn_refresh_token[0])
-                do_psn_wakeup(&cfg, &chiaki_log);
-            else
-                do_wakeup(&cfg, &chiaki_log);
-
-            Uint32 deadline      = SDL_GetTicks() + (Uint32)cfg.wakeup_delay_ms;
-            Uint32 next_wakeup   = SDL_GetTicks() + 5000;
-            app_log_always("[WAKEUP] Waiting up to %dms for PS5 to become ready...\n",
-                    cfg.wakeup_delay_ms);
-            bool ps5_ready = false;
-            SDL_Event ev;
-
-            struct sockaddr_in sa;
-            memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET;
-            sa.sin_port   = htons(9295);
-            inet_pton(AF_INET, cfg.host, &sa.sin_addr);
-
-            while (!g_should_exit && SDL_GetTicks() < deadline)
-            {
-                while (SDL_PollEvent(&ev))
-                    if (ev.type == SDL_QUIT) { g_should_exit = true; break; }
-                if (g_should_exit) break;
-
-                ui_render_loading(g_renderer, "Waking console");
-                SDL_RenderPresent(g_renderer);
-
-                if (SDL_GetTicks() >= next_wakeup)
-                {
-                    do_wakeup(&cfg, &chiaki_log);
-                    next_wakeup = SDL_GetTicks() + 5000;
-                }
-
-                int probe = socket(AF_INET, SOCK_STREAM, 0);
-                if (probe < 0)
-                {
-                    app_log("[WAKEUP] probe: socket() failed: %s\n", strerror(errno));
-                    SDL_Delay(500);
-                    continue;
-                }
-                int flags = fcntl(probe, F_GETFL, 0);
-                fcntl(probe, F_SETFL, flags | O_NONBLOCK);
-
-                int rc = connect(probe, (struct sockaddr *)&sa, sizeof(sa));
-                if (rc == 0)
-                {
-                    close(probe);
-                    app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
-                    ps5_ready = true;
-                    break;
-                }
-                else if (errno == EINPROGRESS)
-                {
-                    fd_set wfds;
-                    FD_ZERO(&wfds);
-                    FD_SET(probe, &wfds);
-                    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-                    int sel = select(probe + 1, NULL, &wfds, NULL, &tv);
-                    if (sel > 0)
-                    {
-                        int err2 = 0;
-                        socklen_t len = sizeof(err2);
-                        getsockopt(probe, SOL_SOCKET, SO_ERROR, &err2, &len);
-                        if (err2 == 0)
-                        {
-                            close(probe);
-                            app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
-                            ps5_ready = true;
-                            break;
-                        }
-                        app_log("[WAKEUP] probe: %s (errno=%d)\n",
-                                err2 == ECONNREFUSED ? "ECONNREFUSED — PS5 NIC up, port 9295 closed"
-                                                     : strerror(err2), err2);
-                    }
-                    else if (sel == 0)
-                    {
-                        app_log("[WAKEUP] probe: select timeout — PS5 not yet reachable\n");
-                    }
-                    else
-                    {
-                        app_log("[WAKEUP] probe: select error: %s\n", strerror(errno));
-                    }
-                }
+            bool ps5_ready = host_port_ready(cfg.host, 9295, 250);
+            if (ps5_ready) {
+                app_log_always("[WAKEUP] PS5 is already ready; skipping wakeup\n");
+            } else {
+                if (cfg.psn_refresh_token && cfg.psn_refresh_token[0])
+                    do_psn_wakeup(&cfg, &wakeup_log);
                 else
+                    do_wakeup(&cfg, &wakeup_log);
+
+                Uint32 deadline = SDL_GetTicks() + (Uint32)cfg.wakeup_delay_ms;
+                Uint32 next_wakeup = SDL_GetTicks() + 5000;
+                app_log_always("[WAKEUP] Waiting up to %dms for PS5 to become ready...\n",
+                        cfg.wakeup_delay_ms);
+                SDL_Event ev;
+
+                while (!g_should_exit && SDL_GetTicks() < deadline)
                 {
-                    app_log("[WAKEUP] probe: connect immediate error: %s (errno=%d)\n",
-                            strerror(errno), errno);
+                    while (SDL_PollEvent(&ev))
+                        if (ev.type == SDL_QUIT) { g_should_exit = true; break; }
+                    if (g_should_exit) break;
+
+                    ui_render_loading(g_renderer, "Waking console");
+                    SDL_RenderPresent(g_renderer);
+
+                    if (host_port_ready(cfg.host, 9295, 1000)) {
+                        app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
+                        ps5_ready = true;
+                        break;
+                    }
+
+                    if (SDL_GetTicks() >= next_wakeup)
+                    {
+                        do_wakeup(&cfg, &wakeup_log);
+                        next_wakeup = SDL_GetTicks() + 5000;
+                    }
+                    SDL_Delay(250);
                 }
-                close(probe);
-                SDL_Delay(500);
             }
-            if (!ps5_ready && !g_should_exit)
-                app_log_always("[WAKEUP] Deadline reached — attempting connection anyway\n");
+
+            if (!ps5_ready && !g_should_exit) {
+                app_log_always("[WAKEUP] PS5 did not become reachable; returning to launcher\n");
+                snprintf(launcher_message, sizeof(launcher_message),
+                         "PS5 did not wake at %s. Turn it on or check Rest Mode network settings.",
+                         cfg.host);
+                return_to_launcher = true;
+                break;
+            }
         }
+
+        if (g_should_exit)
+            break;
 
         ChiakiErrorCode err = chiaki_session_init(&g_session, &info, &chiaki_log);
         if (err != CHIAKI_ERR_SUCCESS)
         {
             app_log("[APP] chiaki_session_init failed: %s\n", chiaki_error_string(err));
-            // Transient failure — wait and retry
-            SDL_Delay(5000);
-            continue;
+            snprintf(launcher_message, sizeof(launcher_message),
+                     "Could not initialize stream: %s", chiaki_error_string(err));
+            return_to_launcher = true;
+            break;
         }
 
-        chiaki_session_set_event_cb(&g_session, session_event_cb, NULL);
+        chiaki_session_set_event_cb(&g_session, session_event_cb, input_ctx);
         chiaki_session_set_video_sample_cb(&g_session,
             video_sample_cb, video_ctx);
         app_log("[APP] Video callback registered\n");
@@ -1429,18 +1506,22 @@ int main(int argc, char *argv[])
                 (void *)audio_sink.frame_cb,
                 audio_sink.user);
 
+        ChiakiAudioSink haptics_sink = input_make_haptics_sink(input_ctx);
+        chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
+        app_log("[APP] Haptics sink registered\n");
+
         err = chiaki_session_start(&g_session);
         if (err != CHIAKI_ERR_SUCCESS)
         {
             app_log("[APP] chiaki_session_start failed: %s\n", chiaki_error_string(err));
             chiaki_session_fini(&g_session);
-            SDL_Delay(5000);
-            continue;
+            snprintf(launcher_message, sizeof(launcher_message),
+                     "Could not start stream: %s", chiaki_error_string(err));
+            return_to_launcher = true;
+            break;
         }
 
-        // Wire the evdev reader thread to this session so it can push
-        // controller state updates. The reader thread was started in
-        // input_init() and waits for a non-NULL session pointer.
+        // Attach the SDL controller state/feedback path to this session.
         input_set_session(input_ctx, &g_session);
         app_log_always("[APP] Session started — entering event loop\n");
 
@@ -1464,21 +1545,18 @@ int main(int argc, char *argv[])
                     g_session_ended = true;
                     break;
                 }
-                // TV remote Back button → exit the app (not forwarded to PS5).
-                // All gamepad buttons are handled in input.c's evdev reader thread
-                // via EVIOCGRAB — the system never sees them.
+                // TV remote Back or Red → disconnect/exit (not forwarded to PS5).
                 if (ev.type == SDL_KEYDOWN &&
-                    (ev.key.keysym.sym == (SDL_Keycode)1073742094 ||  // WEBOS_KEY_BACK
-                     ev.key.keysym.sym == SDLK_ESCAPE))
+                    webos_event_is_back_or_red(&ev.key))
                 {
-                    app_log("[APP] Remote Back/Escape — exiting\n");
+                    app_log("[APP] Remote Back/Red — disconnecting\n");
                     g_should_exit   = true;
                     g_session_ended = true;
                     break;
                 }
                 // ── Block TV remote navigation keys during streaming ─────────
                 // During an active stream, the TV remote should not send any
-                // input to the PS5 — only the gamepad (via evdev in input.c)
+                // input to the PS5 — only the SDL GameController path
                 // controls the console.  Remote keys we handle here:
                 //   UP (short press) → toggle stats overlay
                 //   All other nav keys → swallowed silently
@@ -1491,14 +1569,12 @@ int main(int argc, char *argv[])
                     bool is_up = (k == SDLK_UP || (int)k == 1073741906);    // WEBOS_KEY_UP
 
                     // Block ALL remote directional / navigation keys from
-                    // reaching the PS5.  Gamepad D-pad is handled exclusively
-                    // through the evdev reader thread in input.c.
+                    // reaching the PS5. Gamepad D-pad uses SDL controller events.
                     bool is_remote_nav = is_up
                         || k == SDLK_DOWN   || (int)k == 1073741905   // WEBOS_KEY_DOWN
                         || k == SDLK_LEFT   || (int)k == 1073741904   // WEBOS_KEY_LEFT
                         || k == SDLK_RIGHT  || (int)k == 1073741903   // WEBOS_KEY_RIGHT
-                        || k == SDLK_RETURN || (int)k == 1073741912   // WEBOS_KEY_ENTER / OK
-                        || (int)k == 1073742093                        // WEBOS_KEY_RED
+                        || k == SDLK_RETURN || k == SDLK_KP_ENTER
                         || (int)k == 1073742089                        // WEBOS_KEY_GREEN
                         || (int)k == 1073742090                        // WEBOS_KEY_YELLOW
                         || (int)k == 1073742091;                       // WEBOS_KEY_BLUE
@@ -1516,8 +1592,10 @@ int main(int argc, char *argv[])
                         continue;
                     }
                 }
-                input_handle_event(&ev, input_ctx, &g_session);
+                input_handle_event(input_ctx, &ev);
             }
+
+            input_pump(input_ctx);
 
             // While we're waiting for the first video sample, show an opaque
             // loading screen. Once video starts, switch back to transparent
@@ -1591,15 +1669,25 @@ int main(int argc, char *argv[])
             SDL_Delay(500);
         }
 
-        // Detach session from evdev reader before tearing down the session.
-        input_set_session(input_ctx, NULL);
         app_log_always("[APP] Stopping session (reason=%d)\n", (int)g_quit_reason);
         chiaki_session_stop(&g_session);
         chiaki_session_join(&g_session);
+        // No callbacks can race feedback release after the session is joined.
+        input_set_session(input_ctx, NULL);
         chiaki_session_fini(&g_session);
 
         // ── Reconnect decision ────────────────────────────────────────────────
-        if (!g_should_exit && should_reconnect(g_quit_reason))
+        const char *request_failure =
+            session_request_failure_message(g_quit_reason);
+        if (!g_should_exit && request_failure)
+        {
+            snprintf(launcher_message, sizeof(launcher_message),
+                     "%s", request_failure);
+            return_to_launcher = true;
+            app_log_always("[APP] Session request failed — returning to launcher\n");
+            break;
+        }
+        else if (!g_should_exit && should_reconnect(g_quit_reason))
         {
             app_log_always("[APP] Session ended due to network error — retrying in 4s...\n");
             SDL_Delay(4000);
@@ -1613,13 +1701,16 @@ int main(int argc, char *argv[])
     }
 
 cleanup_session_ctx:
-    input_fini(input_ctx);
     audio_fini(audio_ctx);
     video_fini(video_ctx);
     SS4S_PlayerClose(ss4s_player);
     SS4S_Quit();
 
+    if (return_to_launcher && !g_should_exit)
+        goto show_launcher;
+
 cleanup_sdl:
+    input_fini(input_ctx);
     SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);
     SDL_Quit();
