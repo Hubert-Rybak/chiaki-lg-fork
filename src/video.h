@@ -7,11 +7,17 @@
 
 typedef struct VideoContext VideoContext;
 
-VideoContext *video_init(SS4S_Player *player, int width, int height, int fps, int chiaki_codec);
+typedef enum VideoInitResult
+{
+    VIDEO_INIT_OK = 0,
+    VIDEO_INIT_UNSUPPORTED_CODEC,
+    VIDEO_INIT_ERROR,
+} VideoInitResult;
+
+VideoContext *video_init(SS4S_Player *player, int width, int height, int fps,
+                         int chiaki_codec, VideoInitResult *result);
 void          video_fini(VideoContext *ctx);
 
-/* Actual ChiakiVideoSampleCallback typedef (confirmed from build error output):
- *   bool (*)(uint8_t *buf, unsigned int buf_size, int codec, bool is_keyframe, void *user)
- * chiaki passes codec type and keyframe flag — no need to parse NAL headers ourselves.
- * Returns true on success; chiaki logs a warning if false is returned. */
-bool video_sample_cb(uint8_t *buf, unsigned int buf_size, int codec, bool is_keyframe, void *user);
+/* Matches ChiakiVideoSampleCallback from chiaki-ng 1.10.0 exactly. */
+bool video_sample_cb(uint8_t *buf, size_t buf_size, int32_t frames_lost,
+                     bool frame_recovered, void *user);

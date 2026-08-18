@@ -11,6 +11,8 @@ typedef struct {
     int      video_height;
     int      video_fps;
     int      video_bitrate;
+    double   packet_loss_max;   // maximum loss reported to Chiaki congestion control (0.0-1.0)
+    bool     idr_on_fec_failure;
     bool     ps5;
     bool     hw_decode;
     char    *video_codec;       // "h265" (default), "h265_hdr" (PS5 HDR/HEVC), or "h264"

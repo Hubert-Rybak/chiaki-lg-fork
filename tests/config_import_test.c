@@ -74,6 +74,17 @@ static void assert_safe_wakeup_delay(const char *config_path)
     free(generated);
 }
 
+static void assert_advanced_stream_settings(const char *config_path)
+{
+    char *generated = read_text(config_path);
+    if (!strstr(generated, "\"packet_loss_max\": 0.20") ||
+        !strstr(generated, "\"idr_on_fec_failure\": false")) {
+        free(generated);
+        fail("advanced stream settings were not imported");
+    }
+    free(generated);
+}
+
 static void run_case(const char *dir, const char *name,
                      const char *existing_host,
                      const char *manual_mac,
@@ -93,6 +104,8 @@ static void run_case(const char *dir, const char *name,
     snprintf(config, sizeof(config),
              "{\n  \"host\": \"%s\",\n  \"video_width\": 1920,\n"
              "  \"video_height\": 1080,\n  \"video_fps\": 60,\n"
+             "  \"packet_loss_max\": 0.15,\n"
+             "  \"idr_on_fec_failure\": true,\n"
              "  \"psn_refresh_token\": \"\"\n}\n",
              existing_host);
     snprintf(ini, sizeof(ini),
@@ -109,7 +122,9 @@ static void run_case(const char *dir, const char *name,
              "1\\registered_mac=%s\n"
              "size=1\n"
              "[settings]\n"
-             "psn_account_id=AAAAAAAAAAA=\n",
+             "psn_account_id=AAAAAAAAAAA=\n"
+             "packet_loss_reported_max=0.20\n"
+             "idr_on_fec_failure=false\n",
              manual_mac);
 
     write_text(config_path, config);
@@ -119,6 +134,7 @@ static void run_case(const char *dir, const char *name,
         fail("import returned the wrong result");
     assert_host(config_path, expected_host);
     assert_safe_wakeup_delay(config_path);
+    assert_advanced_stream_settings(config_path);
 
     if (verify_reimport) {
         /* The TV keeps the export as .imported after the first successful run. */
@@ -127,6 +143,7 @@ static void run_case(const char *dir, const char *name,
             fail(".imported fallback returned the wrong result");
         assert_host(config_path, expected_host);
         assert_safe_wakeup_delay(config_path);
+        assert_advanced_stream_settings(config_path);
     }
 
     unlink(imported_path);
