@@ -195,9 +195,11 @@ matches these TVs. On first launch, the app asks Homebrew Channel's elevated
 service to install it under
 `/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
 `90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
-unchanged. Installation never rebinds a controller that is already in use;
-after the first installation, disconnect and reconnect the pad once so the new
-driver can claim it.
+unchanged. On app launch only, a connected compatible pad is handed from
+`hid-generic` to `playstation` before SDL initializes. The boot hook never
+rebinds pads, and the app never rebinds one during an active input session. If a
+pad is first connected after the app has launched, restart the app once to get
+feedback; input remains available through `hid-generic` in the meantime.
 
 These older releases also contain an LG Bluetooth-stack bug that labels HID
 output as a feature report. The root component includes a small runtime helper
@@ -274,9 +276,11 @@ Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see ab
 Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. Newer TVs provide
 the kernel `hid-playstation` driver directly. Rooted LG1212/O20 TVs using LG's
 4.4.84 kernel can install the bundled compatibility module automatically; other
-older platforms continue to work as input-only through `hid-generic`. After the
-compatibility component is installed for the first time, reconnect the
-controller once; the app deliberately does not rebind an active controller.
+older platforms continue to work as input-only through `hid-generic`. Keep the
+controller connected while launching the app so the compatibility driver can
+claim it before SDL starts. If it is connected later, restart the app once. The
+app deliberately avoids rebinding or sending advanced feedback through the
+wrong driver during an active controller session.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:

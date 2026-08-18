@@ -374,6 +374,11 @@ bool dualsense_hid_playstation_bound(void)
     return visit_input_blocks(driver_visitor, NULL);
 }
 
+static bool dualsense_hid_playstation_registered(void)
+{
+    return access("/sys/bus/hid/drivers/playstation", F_OK) == 0;
+}
+
 static bool dualsense_root_transport_patched(void)
 {
     FILE *marker = fopen(ROOT_PATCH_MARKER, "r");
@@ -530,8 +535,14 @@ DualSenseFeedback *dualsense_feedback_new(void)
         app_log("[DUALSENSE] No Bluetooth DualSense address found\n");
         return NULL;
     }
-    if (!dualsense_hid_playstation_bound() &&
-        !dualsense_root_transport_patched()) {
+    bool driver_bound = dualsense_hid_playstation_bound();
+    if (dualsense_hid_playstation_registered() && !driver_bound) {
+        app_log_always("[DUALSENSE] playstation driver is registered but does "
+                       "not own this controller; advanced feedback disabled "
+                       "to preserve the Bluetooth connection\n");
+        return NULL;
+    }
+    if (!driver_bound && !dualsense_root_transport_patched()) {
         app_log_always("[DUALSENSE] No native driver or rooted Bluetooth "
                        "transport correction; advanced feedback disabled\n");
         return NULL;

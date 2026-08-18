@@ -1064,7 +1064,7 @@ int main(int argc, char *argv[])
 
     /* Rooted TVs can activate the bundled, strictly compatibility-gated
      * DualSense driver and old-webOS Bluetooth correction through Homebrew. */
-    root_feedback_bootstrap_async();
+    root_feedback_bootstrap();
 
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
