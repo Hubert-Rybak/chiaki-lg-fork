@@ -14,6 +14,10 @@ if init_position < 0:
 if hint_position > init_position:
     raise SystemExit("Bluetooth DualSense routing hint must be set before SDL_Init")
 
+device_hint_position = source.find("SDL_HINT_JOYSTICK_DEVICE")
+if device_hint_position < 0 or device_hint_position > init_position:
+    raise SystemExit("Explicit DualSense evdev path must be configured before SDL_Init")
+
 hint_call = source[hint_position:init_position]
 for device_id in ("0x054c/0x0ce6", "0x054c/0x0df2"):
     if device_id not in hint_call:

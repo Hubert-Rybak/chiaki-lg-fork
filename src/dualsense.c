@@ -340,6 +340,68 @@ bool dualsense_find_bluetooth_address(char *address, size_t address_size)
     return visit_input_blocks(address_visitor, &search);
 }
 
+bool dualsense_extract_event_path(const char *block,
+                                  char *path, size_t path_size)
+{
+    if (!block || !path || path_size == 0 || !block_is_dualsense(block))
+        return false;
+
+    char handlers[512];
+    if (!block_value(block, "H: Handlers=", handlers, sizeof(handlers)))
+        return false;
+
+    bool has_joystick = false;
+    const char *event = NULL;
+    char *save = NULL;
+    for (char *token = strtok_r(handlers, " \t", &save);
+         token;
+         token = strtok_r(NULL, " \t", &save)) {
+        if (strncmp(token, "js", 2) == 0 && isdigit((unsigned char)token[2]))
+            has_joystick = true;
+        if (strncmp(token, "event", 5) == 0 && isdigit((unsigned char)token[5])) {
+            bool digits_only = true;
+            for (const char *p = token + 5; *p; ++p) {
+                if (!isdigit((unsigned char)*p)) {
+                    digits_only = false;
+                    break;
+                }
+            }
+            if (digits_only)
+                event = token;
+        }
+    }
+    if (!has_joystick || !event)
+        return false;
+
+    int n = snprintf(path, path_size, "/dev/input/%s", event);
+    if (n < 0 || (size_t)n >= path_size) {
+        path[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+typedef struct {
+    char *path;
+    size_t path_size;
+} EventPathSearch;
+
+static bool event_path_visitor(const char *block, void *user)
+{
+    EventPathSearch *search = user;
+    return dualsense_extract_event_path(block, search->path,
+                                        search->path_size);
+}
+
+bool dualsense_find_event_path(char *path, size_t path_size)
+{
+    if (!path || path_size == 0)
+        return false;
+    path[0] = '\0';
+    EventPathSearch search = { path, path_size };
+    return visit_input_blocks(event_path_visitor, &search);
+}
+
 static bool driver_visitor(const char *block, void *user)
 {
     (void)user;

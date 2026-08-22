@@ -47,6 +47,7 @@
 #include "root_feedback.h"
 #include "psn_account_id.h"
 #include "webos_keys.h"
+#include "dualsense.h"
 
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
@@ -1294,6 +1295,11 @@ int main(int argc, char *argv[])
      * while routing Bluetooth DualSense/Edge input through the kernel evdev
      * node created by hid-playstation.  SDL-webOS reads this hint during
      * SDL_Init, so it must remain above that call. */
+    char dualsense_event_path[128] = {0};
+    const bool dualsense_event_found = dualsense_find_event_path(
+        dualsense_event_path, sizeof(dualsense_event_path));
+    const SDL_bool dualsense_device_hint = !dualsense_event_found ||
+        SDL_SetHint(SDL_HINT_JOYSTICK_DEVICE, dualsense_event_path);
     const SDL_bool dualsense_evdev_hint = SDL_SetHint(
         "SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
         "0x054c/0x0ce6,0x054c/0x0df2");
@@ -1302,8 +1308,12 @@ int main(int argc, char *argv[])
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
-    app_log_always("[INPUT] Bluetooth DualSense routing: %s\n",
-                   dualsense_evdev_hint ? "evdev" : "SDL hint rejected");
+    app_log_always(
+        "[INPUT] Bluetooth DualSense routing: %s; device path: %s\n",
+        dualsense_evdev_hint && dualsense_device_hint
+            ? "evdev" : "SDL hint rejected",
+        dualsense_event_found ? dualsense_event_path
+                              : "not connected at startup");
 
     // NDL renders video on a hardware plane BELOW the app's GL surface.
     // To make the video visible we need our GL surface to be transparent.

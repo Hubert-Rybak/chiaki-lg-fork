@@ -33,6 +33,9 @@ bool dualsense_build_payload(const char *address,
 bool dualsense_extract_bluetooth_address(const char *input_block,
                                          char *address, size_t address_size);
 bool dualsense_find_bluetooth_address(char *address, size_t address_size);
+bool dualsense_extract_event_path(const char *input_block,
+                                  char *path, size_t path_size);
+bool dualsense_find_event_path(char *path, size_t path_size);
 bool dualsense_hid_playstation_bound(void);
 
 /* Bluetooth feedback. Returns NULL when this TV/controller cannot support it. */
