@@ -96,14 +96,20 @@ fi
 load_status=$?
 set -e
 case "$load_status" in
-    0|75)
-        # PID 75 means the Bluetooth daemon was not up yet. The boot hook and
-        # the next app launch retry without touching the library on disk.
+    0)
         if [ "$REBIND_CONNECTED" = true ]; then
-            echo "Connected compatible controllers were rebound before SDL startup."
+            echo "Safe connected-controller rebind pass completed before SDL startup."
         else
             echo "Connected controllers were left untouched."
         fi
+        cp "$BUNDLE_ROOT/root/boot-hook.sh" "$HOOK_PATH"
+        chmod 0755 "$HOOK_PATH"
+        ;;
+    75)
+        # The Bluetooth daemon was not ready, so load.sh deliberately left the
+        # compatibility module and any connected controller on the safe generic
+        # path. The boot hook and next app launch will retry.
+        echo "Bluetooth service is not ready; compatibility activation was safely deferred."
         cp "$BUNDLE_ROOT/root/boot-hook.sh" "$HOOK_PATH"
         chmod 0755 "$HOOK_PATH"
         ;;

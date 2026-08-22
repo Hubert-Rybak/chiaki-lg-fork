@@ -45,6 +45,7 @@
 #include "config_import.h"
 #include "app_id.h"
 #include "root_feedback.h"
+#include "psn_account_id.h"
 #include "webos_keys.h"
 
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
@@ -292,16 +293,12 @@ static bool host_port_ready(const char *host, uint16_t port, int timeout_ms)
 
 static void do_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
-    uint8_t account_id[8];
-    size_t decoded_len = sizeof(account_id);
-    if (chiaki_base64_decode(cfg->psn_account_id_b64,
-                             strlen(cfg->psn_account_id_b64),
-                             account_id, &decoded_len) != CHIAKI_ERR_SUCCESS)
+    uint64_t credential = 0;
+    if (!psn_account_id_to_uint64(cfg->psn_account_id_b64, &credential))
     {
-        app_log_always("[WAKEUP] Failed to decode psn_account_id — check config\n");
+        app_log_always("[WAKEUP] Failed to parse psn_account_id — check config\n");
         return;
     }
-    uint64_t credential = *(uint64_t *)account_id;
 
     // Send unicast to the PS5's IP address.
     app_log("[WAKEUP] Sending packet (unicast) to %s\n", cfg->host);
@@ -586,47 +583,6 @@ static char *psn_list_devices(const char *access_token)
 }
 
 // ── Send wakeup via PSN session manager ──────────────────────────────────────
-// ── Decode base64 PSN account ID to numeric string ───────────────────────────
-// PSN stores account IDs as 8-byte big-endian values, base64-encoded.
-// The API wants the decimal string representation.
-static bool psn_decode_account_id(const char *b64, char *out, size_t out_sz)
-{
-    // base64 decode (simple inline — input is always 12 chars for 8 bytes)
-    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    uint8_t buf[8];
-    size_t b64_len = strlen(b64);
-    size_t pad = 0;
-    if (b64_len > 0 && b64[b64_len-1] == '=') pad++;
-    if (b64_len > 1 && b64[b64_len-2] == '=') pad++;
-
-    size_t out_len = 0;
-    uint32_t accum = 0;
-    int bits = 0;
-    for (size_t i = 0; i < b64_len && b64[i] != '='; i++) {
-        const char *p = strchr(t, b64[i]);
-        if (!p) continue;
-        accum = (accum << 6) | (uint32_t)(p - t);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            if (out_len < sizeof(buf))
-                buf[out_len++] = (uint8_t)(accum >> bits);
-            accum &= (1u << bits) - 1;
-        }
-    }
-    if (out_len != 8) {
-        app_log_always("[PSN] account_id base64 decode: expected 8 bytes, got %zu\n", out_len);
-        return false;
-    }
-
-    // Little-endian uint64 (PSN stores account ID as LE bytes in base64)
-    uint64_t id = 0;
-    for (int i = 7; i >= 0; i--)
-        id = (id << 8) | buf[i];
-
-    snprintf(out, out_sz, "%" PRIu64, id);
-    return true;
-}
 
 // ── Generate a client device UID ─────────────────────────────────────────────
 // chiaki-ng client DUIDs are 48 hex chars starting with "0000000700410080".
@@ -882,10 +838,11 @@ static void do_psn_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
     app_log_always("[PSN] Starting PSN cloud wakeup sequence\n");
 
-    // Step 0: Decode PSN account ID from base64 to numeric string
+    // Step 0: Convert canonical base64 or compatible decimal ID for the API.
     char account_id[32];
     if (!cfg->psn_account_id_b64 || !cfg->psn_account_id_b64[0] ||
-        !psn_decode_account_id(cfg->psn_account_id_b64, account_id, sizeof(account_id)))
+        !psn_account_id_to_decimal(cfg->psn_account_id_b64,
+                                   account_id, sizeof(account_id)))
     {
         app_log_always("[PSN] No valid psn_account_id — falling back to UDP wakeup\n");
         do_wakeup(cfg, log);
@@ -1612,13 +1569,10 @@ show_launcher:
         return_to_launcher = true;
         goto cleanup_ss4s;
     }
-    uint8_t account_id_raw[8];
-    decoded_len = sizeof(account_id_raw);
-    if (chiaki_base64_decode(cfg.psn_account_id_b64,
-                             strlen(cfg.psn_account_id_b64),
-                             account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
+    uint8_t account_id_raw[PSN_ACCOUNT_ID_SIZE];
+    if (!psn_account_id_decode(cfg.psn_account_id_b64, account_id_raw))
     {
-        app_log("[APP] Failed to decode psn_account_id\n");
+        app_log("[APP] Failed to parse psn_account_id\n");
         snprintf(launcher_message, sizeof(launcher_message),
                  "PSN account ID is invalid. Import config again.");
         return_to_launcher = true;

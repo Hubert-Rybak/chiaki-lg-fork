@@ -72,6 +72,7 @@ static void b64_encode(const uint8_t *in, size_t in_len, char *out)
  * Qt escape sequences used inside ByteArray content:
  *   \xHH  — hex byte (1 or 2 hex digits after the x)
  *   \0    — null byte (0x00)
+ *   \a, \b, \f, \n, \r, \t, \v — named C/Qt control bytes
  *   \"    — double-quote byte (0x22) — needed because INI values may be quoted
  *   \\    — literal backslash (0x5c)
  *   other printable ASCII — literal byte
@@ -101,6 +102,20 @@ static int parse_qt_bytearray(const char *val, uint8_t *out, int max_out)
                 out[n++] = (uint8_t)strtol(hex, NULL, 16);
             } else if (*p == '0') {
                 out[n++] = 0x00; p++;
+            } else if (*p == 'a') {
+                out[n++] = 0x07; p++;
+            } else if (*p == 'b') {
+                out[n++] = 0x08; p++;
+            } else if (*p == 'f') {
+                out[n++] = 0x0c; p++;
+            } else if (*p == 'n') {
+                out[n++] = 0x0a; p++;
+            } else if (*p == 'r') {
+                out[n++] = 0x0d; p++;
+            } else if (*p == 't') {
+                out[n++] = 0x09; p++;
+            } else if (*p == 'v') {
+                out[n++] = 0x0b; p++;
             } else if (*p == '"') {
                 out[n++] = 0x22; p++;
             } else if (*p == '\\') {

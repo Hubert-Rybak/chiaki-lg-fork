@@ -85,6 +85,20 @@ static void assert_advanced_stream_settings(const char *config_path)
     free(generated);
 }
 
+static void assert_qt_named_escapes(void)
+{
+    static const uint8_t expected[] = {
+        0x07, 0x08, 0x0c, 0x0a, 0x0d, 0x09, 0x0b, 0x22, 0x5c, 0x41,
+    };
+    uint8_t decoded[sizeof(expected)] = {0};
+    int decoded_len = parse_qt_bytearray(
+        "@ByteArray(\\a\\b\\f\\n\\r\\t\\v\\\"\\\\\\x41)",
+        decoded, sizeof(decoded));
+    if (decoded_len != (int)sizeof(expected) ||
+        memcmp(decoded, expected, sizeof(expected)) != 0)
+        fail("Qt named ByteArray escapes were decoded incorrectly");
+}
+
 static void run_case(const char *dir, const char *name,
                      const char *existing_host,
                      const char *manual_mac,
@@ -152,6 +166,8 @@ static void run_case(const char *dir, const char *name,
 
 int main(void)
 {
+    assert_qt_named_escapes();
+
     char dir[256];
     snprintf(dir, sizeof(dir), "/tmp/chiaki-config-import-test-%ld", (long)getpid());
     if (mkdir(dir, 0700) != 0) fail("could not create temporary directory");

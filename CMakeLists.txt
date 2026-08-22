@@ -143,6 +143,7 @@ add_executable(chiaki-webos
     src/main.c
     src/config.c
     src/config_import.c
+    src/psn_account_id.c
     src/video.c
     src/audio.c
     src/input.c

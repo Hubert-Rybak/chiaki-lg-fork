@@ -12,10 +12,10 @@ WEBOS_BUILD_TYPE="${WEBOS_BUILD_TYPE:-Release}"
 CHIAKI_APP_ID="${CHIAKI_APP_ID:-org.homebrew.chiaki.fork}"
 CHIAKI_NG_REF="${CHIAKI_NG_REF:-0c4a45df0cae2af2ba2daef84e881850b07038a3}"
 SS4S_REF="${SS4S_REF:-dfba721b85420ccabf91dac65be73984bf1865f9}"
-SDL2_WEBOS_RELEASE="${SDL2_WEBOS_RELEASE:-release-2.30.12-webos.5}"
+SDL2_WEBOS_RELEASE="${SDL2_WEBOS_RELEASE:-release-2.30.12-webos.6}"
 SDL2_WEBOS_VERSION="${SDL2_WEBOS_VERSION:-2.30.12}"
 SDL2_WEBOS_SONAME="${SDL2_WEBOS_SONAME:-libSDL2-2.0.so.0.3000.12}"
-SDL2_WEBOS_SHA256="${SDL2_WEBOS_SHA256:-4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334}"
+SDL2_WEBOS_SHA256="${SDL2_WEBOS_SHA256:-63dc9ea268bdf64801fce5e0c19585ee6aaf79f0b08486c853c47f922385c698}"
 LIBEVENT_VERSION="${LIBEVENT_VERSION:-2.1.12-stable}"
 LIBEVENT_SHA256="${LIBEVENT_SHA256:-92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb}"
 
@@ -121,18 +121,20 @@ NJOBS=$(nproc)
 # The TV's SDL 2.0.10 predates DualSense. Use the same webosbrew build proven by
 # punktfunk-webos, both for the standardized controller mapping and evdev FF.
 install_sdl2_webos() {
-    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_VERSION"
+    # Include the backport release in the marker: webOS fixes can change while
+    # the upstream SDL version and SONAME remain the same.
+    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_RELEASE"
     local runtime="$OUR_STAGING/lib/$SDL2_WEBOS_SONAME"
     if [[ -f "$marker" && -f "$runtime" &&
           -f "$OUR_STAGING/include/SDL2/SDL_gamecontroller.h" ]]; then
-        echo "-- SDL-webOS $SDL2_WEBOS_VERSION: skip"
+        echo "-- SDL-webOS $SDL2_WEBOS_RELEASE: skip"
         return
     fi
 
     local asset="SDL2-$SDL2_WEBOS_VERSION-webos.tar.gz"
     local archive="/tmp/$asset"
     local url="https://github.com/webosbrew/SDL-webOS/releases/download/$SDL2_WEBOS_RELEASE/$asset"
-    echo "-- Installing SDL-webOS $SDL2_WEBOS_VERSION"
+    echo "-- Installing SDL-webOS $SDL2_WEBOS_RELEASE"
     if [[ ! -f "$archive" ]] ||
        ! echo "$SDL2_WEBOS_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
         rm -f "$archive"
