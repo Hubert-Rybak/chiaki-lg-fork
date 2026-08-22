@@ -22,4 +22,14 @@ for device_id in ("0x054c/0x0ce6", "0x054c/0x0df2"):
 if 'SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0")' in source:
     raise SystemExit("Do not disable HIDAPI globally; only Bluetooth DualSense is affected")
 
+for setting in (
+    '"SDL_JOYSTICK_DISABLE_UDEV", "1"',
+    '"SDL_HIDAPI_JOYSTICK_DISABLE_UDEV", "1", 1',
+):
+    position = source.find(setting)
+    if position < 0:
+        raise SystemExit(f"Stable SDL device discovery setting is missing: {setting}")
+    if position > init_position:
+        raise SystemExit(f"SDL device discovery must be configured before SDL_Init: {setting}")
+
 print("SDL Bluetooth DualSense evdev routing test passed")

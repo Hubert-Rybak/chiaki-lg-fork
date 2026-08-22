@@ -1297,13 +1297,26 @@ int main(int argc, char *argv[])
     const SDL_bool dualsense_evdev_hint = SDL_SetHint(
         "SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
         "0x054c/0x0ce6,0x054c/0x0df2");
+
+    /* SDL-webOS .6 normally replaces its app-jail polling fallback with raw
+     * kernel uevents.  Some webOS 6 builds emit a stale remove notification
+     * for an input node that is still present, which makes SDL close a valid
+     * controller moments after opening it.  Select SDL's established
+     * inotify/polling fallback for both evdev and HIDAPI discovery. */
+    const SDL_bool stable_joystick_discovery = SDL_SetHint(
+        "SDL_JOYSTICK_DISABLE_UDEV", "1");
+    const int stable_hidapi_discovery = SDL_setenv(
+        "SDL_HIDAPI_JOYSTICK_DISABLE_UDEV", "1", 1);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
-    app_log_always("[INPUT] Bluetooth DualSense routing: %s\n",
-                   dualsense_evdev_hint ? "evdev" : "SDL hint rejected");
+    app_log_always(
+        "[INPUT] Bluetooth DualSense routing: %s; stable discovery: %s\n",
+        dualsense_evdev_hint ? "evdev" : "SDL hint rejected",
+        stable_joystick_discovery && stable_hidapi_discovery == 0
+            ? "enabled" : "configuration rejected");
 
     // NDL renders video on a hardware plane BELOW the app's GL surface.
     // To make the video visible we need our GL surface to be transparent.

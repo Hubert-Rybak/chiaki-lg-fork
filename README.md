@@ -214,10 +214,12 @@ Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`
 Connect a gamepad via Bluetooth or USB. Supported controllers include DualSense, DualShock 4, Xbox Wireless Controller, and most HID-compliant gamepads.
 
 The app bundles the webosbrew SDL 2.30.12 webOS.6 backport and uses its
-standardized GameController mapping. Its kernel-uevent device monitor detects
-hotplug/reconnect transitions and input event indices above 31. This keeps the
-PlayStation face-button positions and trigger axes consistent across DualSense,
-DualShock, Xbox, and other pads.
+standardized GameController mapping. Controller discovery uses SDL's
+inotify/polling fallback because some webOS 6 kernels emit a stale raw-uevent
+removal for an input node that remains present. This keeps the controller
+handle stable while retaining hotplug detection and consistent PlayStation
+face-button positions and trigger axes across DualSense, DualShock, Xbox, and
+other pads.
 
 On webOS, Bluetooth DualSense and DualSense Edge devices are excluded from
 SDL's HIDAPI backend and routed through their kernel `/dev/input/event*` node.
@@ -502,7 +504,7 @@ configuration separate from development builds.
 | libevent | 2.1.12-stable | static | Event loop for chiaki-ng remote hole punching |
 | GF-Complete | master | static | Erasure coding (chiaki dependency) |
 | Jerasure | 2.0 | static | FEC (chiaki dependency) |
-| SDL-webOS | 2.30.12 webOS.6 | bundled dynamic | Window/GL surface, uevent-based controller hotplug, mapping/rumble, TV remote input |
+| SDL-webOS | 2.30.12 webOS.6 | bundled dynamic | Window/GL surface, stable inotify/polling controller discovery, mapping/rumble, TV remote input |
 | nanopb | 0.4.x | static | Protobuf (chiaki submodule) |
 
 ---
