@@ -179,6 +179,10 @@ jobs:
             -o "$RUNNER_TEMP/psn-account-id-test"
           "$RUNNER_TEMP/psn-account-id-test"
 
+      - name: Test SDL Bluetooth DualSense routing
+        shell: bash
+        run: python3 tests/sdl_input_routing_test.py
+
       - name: Test stream configuration and recovery policy
         shell: bash
         run: |

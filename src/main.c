@@ -1287,11 +1287,23 @@ int main(int argc, char *argv[])
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+
+    /* The webOS app jail exposes Bluetooth PlayStation controllers through
+     * hidraw, but does not deliver their input reports reliably there.  Keep
+     * HIDAPI available for every other controller (and for USB DualSense),
+     * while routing Bluetooth DualSense/Edge input through the kernel evdev
+     * node created by hid-playstation.  SDL-webOS reads this hint during
+     * SDL_Init, so it must remain above that call. */
+    const SDL_bool dualsense_evdev_hint = SDL_SetHint(
+        "SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
+        "0x054c/0x0ce6,0x054c/0x0df2");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    app_log_always("[INPUT] Bluetooth DualSense routing: %s\n",
+                   dualsense_evdev_hint ? "evdev" : "SDL hint rejected");
 
     // NDL renders video on a hardware plane BELOW the app's GL surface.
     // To make the video visible we need our GL surface to be transparent.

@@ -219,6 +219,12 @@ hotplug/reconnect transitions and input event indices above 31. This keeps the
 PlayStation face-button positions and trigger axes consistent across DualSense,
 DualShock, Xbox, and other pads.
 
+On webOS, Bluetooth DualSense and DualSense Edge devices are excluded from
+SDL's HIDAPI backend and routed through their kernel `/dev/input/event*` node.
+The TV app jail can enumerate `/dev/hidraw*` but does not reliably deliver
+Bluetooth input reports there. The exception is limited to these two Bluetooth
+device IDs; USB DualSense and all other controller backends remain unchanged.
+
 Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
 haptic audio stream is translated to the controller motors. A Bluetooth
 DualSense additionally receives adaptive-trigger effects, lightbar colour, and
