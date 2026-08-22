@@ -3,10 +3,9 @@
  * Minimal DualSense compatibility driver for older LG webOS kernels.
  *
  * Linux gained the full hid-playstation driver after the 4.4 kernel used by
- * webOS 5/6 televisions.  This module intentionally keeps the kernel's normal
- * HID descriptor parsing (and therefore the input mapping already exposed by
- * hid-generic), while adding the initialization and FF_RUMBLE output path used
- * by DualSense controllers.
+ * webOS 5/6 televisions. This module exposes a standardized gamepad input node
+ * from raw USB/Bluetooth reports and adds the initialization and FF_RUMBLE
+ * output path used by DualSense controllers.
  */
 
 #include <linux/crc32.h>

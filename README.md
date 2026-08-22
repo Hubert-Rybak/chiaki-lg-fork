@@ -228,9 +228,12 @@ The TV app jail can enumerate `/dev/hidraw*` but does not reliably deliver
 Bluetooth input reports there. The active DualSense event handler is read from
 `/proc/bus/input/devices` and passed explicitly to SDL before initialization,
 which also covers event indices above 31. SDL's PS5 HIDAPI driver yields to
-evdev only when that active event handler is present. Pair the pad before
-launching the app; if it connects later, restart the app. Global HIDAPI and
-all non-PlayStation controller backends remain unchanged.
+evdev only when that active event handler is present. If the rooted bootstrap
+has only just created the event node, the app reinitializes SDL's unopened
+controller subsystem for up to two seconds until the app-jail node is usable;
+this avoids requiring a second launch. Pair the pad before launching the app;
+if it connects later, restart the app. Global HIDAPI and all non-PlayStation
+controller backends remain unchanged.
 
 Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
 haptic audio stream is translated to the controller motors. A Bluetooth

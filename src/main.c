@@ -51,6 +51,8 @@
 
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
+#define DUALSENSE_SDL_RETRY_COUNT 20
+#define DUALSENSE_SDL_RETRY_MS    100
 
 #ifndef CHIAKI_NG_REVISION
 #define CHIAKI_NG_REVISION "unknown"
@@ -350,6 +352,56 @@ static void setup_ssl_ca_bundle(void)
         }
     }
     app_log_always("[SSL] WARNING: No CA bundle found\n");
+}
+
+static bool sdl_has_joystick_path(const char *expected_path)
+{
+    if (!expected_path || !expected_path[0])
+        return false;
+
+    int count = SDL_NumJoysticks();
+    for (int i = 0; i < count; ++i) {
+        const char *path = SDL_JoystickPathForIndex(i);
+        if (path && strcmp(path, expected_path) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* The root bootstrap can create the evdev node immediately before SDL starts.
+ * On webOS 6 the node is briefly visible in /proc while its app-jail access is
+ * still settling. SDL-webOS remembers that first failed probe, so polling the
+ * existing subsystem cannot recover it. Reinitialize only the unopened
+ * GameController/joystick subsystem, before InputContext owns any handles. */
+static bool sdl_recover_joystick_path(const char *expected_path)
+{
+    if (sdl_has_joystick_path(expected_path))
+        return true;
+
+    app_log_always("[INPUT] Waiting for controller node %s to become usable\n",
+                   expected_path);
+    for (int attempt = 1; attempt <= DUALSENSE_SDL_RETRY_COUNT; ++attempt) {
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+        SDL_Delay(DUALSENSE_SDL_RETRY_MS);
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
+            app_log_always(
+                "[INPUT] SDL controller retry %d/%d failed: %s\n",
+                attempt, DUALSENSE_SDL_RETRY_COUNT, SDL_GetError());
+            continue;
+        }
+        if (sdl_has_joystick_path(expected_path)) {
+            app_log_always(
+                "[INPUT] Controller node became usable after %d ms\n",
+                attempt * DUALSENSE_SDL_RETRY_MS);
+            return true;
+        }
+    }
+
+    app_log_always(
+        "[INPUT] Controller node %s remained unavailable after %d ms\n",
+        expected_path,
+        DUALSENSE_SDL_RETRY_COUNT * DUALSENSE_SDL_RETRY_MS);
+    return false;
 }
 
 // ── PSN cloud wakeup (direct HTTP — no chiaki holepunch library) ─────────────
@@ -1302,19 +1354,23 @@ int main(int argc, char *argv[])
         SDL_SetHint(SDL_HINT_JOYSTICK_DEVICE, dualsense_event_path);
     const SDL_bool dualsense_ps5_hidapi_hint = !dualsense_event_found ||
         SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "0");
-    const SDL_bool dualsense_evdev_hint = SDL_SetHint(
-        "SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
-        "0x054c/0x0ce6,0x054c/0x0df2");
+    const SDL_bool dualsense_evdev_hint = !dualsense_event_found ||
+        SDL_SetHint("SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
+                    "0x054c/0x0ce6,0x054c/0x0df2");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    const bool dualsense_sdl_ready = !dualsense_event_found ||
+        sdl_recover_joystick_path(dualsense_event_path);
+    const bool dualsense_routed_to_evdev = dualsense_event_found &&
+        dualsense_evdev_hint && dualsense_device_hint &&
+        dualsense_ps5_hidapi_hint && dualsense_sdl_ready;
     app_log_always(
         "[INPUT] Bluetooth DualSense routing: %s; device path: %s\n",
-        dualsense_evdev_hint && dualsense_device_hint &&
-                dualsense_ps5_hidapi_hint
-            ? "evdev" : "SDL hint rejected",
+        dualsense_routed_to_evdev ? "evdev" :
+            (dualsense_event_found ? "evdev unavailable" : "automatic"),
         dualsense_event_found ? dualsense_event_path
                               : "not connected at startup");
 
