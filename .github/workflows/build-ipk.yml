@@ -214,6 +214,11 @@ jobs:
             -pthread \
             -o "$RUNNER_TEMP/dualsense-test"
           "$RUNNER_TEMP/dualsense-test"
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Ikernel/hid-playstation-compat \
+            tests/dualsense_input_report_test.c \
+            -o "$RUNNER_TEMP/dualsense-input-report-test"
+          "$RUNNER_TEMP/dualsense-input-report-test"
 
       - name: Test root bootstrap and scripts
         shell: bash
@@ -250,6 +255,10 @@ jobs:
           grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
           grep -F 'if [ "$patch_status" != 0 ]' packaging/root/load.sh
           grep -F 'device_has_input_node' packaging/root/load.sh
+          grep -F 'HID_CONNECT_HIDRAW' \
+            kernel/hid-playstation-compat/hid-playstation.c
+          grep -F '.raw_event = dualsense_raw_event' \
+            kernel/hid-playstation-compat/hid-playstation.c
 
       - name: Build webOS 4.4 DualSense kernel module
         shell: bash

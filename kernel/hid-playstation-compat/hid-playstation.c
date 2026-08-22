@@ -17,9 +17,12 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
+#include "dualsense-input.h"
+
 #define SONY_VENDOR_ID                         0x054c
 #define DUALSENSE_PRODUCT_ID                   0x0ce6
 #define DUALSENSE_EDGE_PRODUCT_ID              0x0df2
+#define HID_PLAYSTATION_VERSION_PATCH          0x8000
 
 #define DS_OUTPUT_REPORT_USB                   0x02
 #define DS_OUTPUT_REPORT_USB_SIZE              63
@@ -40,7 +43,23 @@
 #define DS_VALID_COMPATIBLE_VIBRATION2         0x04
 #define DS_LIGHTBAR_SETUP_LIGHT_OUT            0x02
 #define DS_OUTPUT_CRC32_SEED                   0xa2
+#define DS_INPUT_CRC32_SEED                    0xa1
 #define DS_FEATURE_VERSION(major, minor)        (((major) << 8) | (minor))
+
+#define DS_BUTTONS0_HAT_SWITCH                 0x0f
+#define DS_BUTTONS0_SQUARE                     0x10
+#define DS_BUTTONS0_CROSS                      0x20
+#define DS_BUTTONS0_CIRCLE                     0x40
+#define DS_BUTTONS0_TRIANGLE                   0x80
+#define DS_BUTTONS1_L1                         0x01
+#define DS_BUTTONS1_R1                         0x02
+#define DS_BUTTONS1_L2                         0x04
+#define DS_BUTTONS1_R2                         0x08
+#define DS_BUTTONS1_CREATE                     0x10
+#define DS_BUTTONS1_OPTIONS                    0x20
+#define DS_BUTTONS1_L3                         0x40
+#define DS_BUTTONS1_R3                         0x80
+#define DS_BUTTONS2_PS_HOME                    0x01
 
 /* Offsets within the 47-byte common portion of USB/Bluetooth output reports. */
 #define DS_COMMON_VALID_FLAG0                  0
@@ -51,6 +70,7 @@
 
 struct dualsense_compat {
 	struct hid_device *hdev;
+	struct input_dev *gamepad;
 	struct work_struct output_worker;
 	spinlock_t lock;
 	u8 *output_report;
@@ -59,6 +79,22 @@ struct dualsense_compat {
 	u8 motor_right;
 	bool use_vibration_v2;
 	bool opened;
+};
+
+static const int dualsense_gamepad_buttons[] = {
+	BTN_WEST,
+	BTN_NORTH,
+	BTN_EAST,
+	BTN_SOUTH,
+	BTN_TL,
+	BTN_TR,
+	BTN_TL2,
+	BTN_TR2,
+	BTN_SELECT,
+	BTN_START,
+	BTN_THUMBL,
+	BTN_THUMBR,
+	BTN_MODE,
 };
 
 static void dualsense_put_crc(u8 *report, size_t size)
@@ -72,6 +108,23 @@ static void dualsense_put_crc(u8 *report, size_t size)
 	report[size - 3] = crc >> 8;
 	report[size - 2] = crc >> 16;
 	report[size - 1] = crc >> 24;
+}
+
+static bool dualsense_check_input_crc(const u8 *report, size_t size)
+{
+	u8 seed = DS_INPUT_CRC32_SEED;
+	u32 expected;
+	u32 crc;
+
+	if (size < 4)
+		return false;
+	expected = (u32)report[size - 4] |
+		   ((u32)report[size - 3] << 8) |
+		   ((u32)report[size - 2] << 16) |
+		   ((u32)report[size - 1] << 24);
+	crc = crc32_le(0xffffffff, &seed, 1);
+	crc = ~crc32_le(crc, report, size - 4);
+	return crc == expected;
 }
 
 static size_t dualsense_prepare_report(struct dualsense_compat *ds, u8 **common)
@@ -207,18 +260,107 @@ static void dualsense_prime_features(struct dualsense_compat *ds)
 	kfree(buf);
 }
 
-static int dualsense_init_ff(struct dualsense_compat *ds)
+static struct input_dev *dualsense_create_gamepad(struct dualsense_compat *ds)
 {
-	struct hid_input *hidinput;
+	struct hid_device *hdev = ds->hdev;
 	struct input_dev *input;
+	int i;
+	int ret;
 
-	if (list_empty(&ds->hdev->inputs))
-		return -ENODEV;
+	input = devm_input_allocate_device(&hdev->dev);
+	if (!input)
+		return ERR_PTR(-ENOMEM);
 
-	hidinput = list_entry(ds->hdev->inputs.next, struct hid_input, list);
-	input = hidinput->input;
+	input->name = hdev->name;
+	input->phys = hdev->phys;
+	input->uniq = hdev->uniq;
+	input->id.bustype = hdev->bus;
+	input->id.vendor = hdev->vendor;
+	input->id.product = hdev->product;
+	input->id.version = hdev->version;
+	input_set_drvdata(input, ds);
+
+	input_set_abs_params(input, ABS_X, 0, 255, 0, 0);
+	input->absinfo[ABS_X].value = 128;
+	input_set_abs_params(input, ABS_Y, 0, 255, 0, 0);
+	input->absinfo[ABS_Y].value = 128;
+	input_set_abs_params(input, ABS_Z, 0, 255, 0, 0);
+	input_set_abs_params(input, ABS_RX, 0, 255, 0, 0);
+	input->absinfo[ABS_RX].value = 128;
+	input_set_abs_params(input, ABS_RY, 0, 255, 0, 0);
+	input->absinfo[ABS_RY].value = 128;
+	input_set_abs_params(input, ABS_RZ, 0, 255, 0, 0);
+	input_set_abs_params(input, ABS_HAT0X, -1, 1, 0, 0);
+	input_set_abs_params(input, ABS_HAT0Y, -1, 1, 0, 0);
+
+	for (i = 0; i < ARRAY_SIZE(dualsense_gamepad_buttons); i++)
+		input_set_capability(input, EV_KEY, dualsense_gamepad_buttons[i]);
 	input_set_capability(input, EV_FF, FF_RUMBLE);
-	return input_ff_create_memless(input, ds, dualsense_play_effect);
+	ret = input_ff_create_memless(input, ds, dualsense_play_effect);
+	if (ret)
+		return ERR_PTR(ret);
+
+	ret = input_register_device(input);
+	if (ret)
+		return ERR_PTR(ret);
+	return input;
+}
+
+static int dualsense_raw_event(struct hid_device *hdev,
+			       struct hid_report *report, u8 *data, int size)
+{
+	struct dualsense_compat *ds = hid_get_drvdata(hdev);
+	struct dualsense_compat_gamepad_report state;
+	bool bluetooth = hdev->bus == BUS_BLUETOOTH;
+
+	if (!ds || !ds->gamepad || !report || size <= 0)
+		return 0;
+	if (!dualsense_compat_decode_gamepad(bluetooth, report->id, data,
+					      size, &state))
+		return 0;
+	if (bluetooth && report->id == DUALSENSE_INPUT_REPORT_BT &&
+	    !dualsense_check_input_crc(data, size)) {
+		hid_dbg(hdev, "discarding DualSense input report with invalid CRC\n");
+		return -EILSEQ;
+	}
+
+	input_report_abs(ds->gamepad, ABS_X, state.left_x);
+	input_report_abs(ds->gamepad, ABS_Y, state.left_y);
+	input_report_abs(ds->gamepad, ABS_RX, state.right_x);
+	input_report_abs(ds->gamepad, ABS_RY, state.right_y);
+	input_report_abs(ds->gamepad, ABS_Z, state.left_trigger);
+	input_report_abs(ds->gamepad, ABS_RZ, state.right_trigger);
+	input_report_abs(ds->gamepad, ABS_HAT0X, state.hat_x);
+	input_report_abs(ds->gamepad, ABS_HAT0Y, state.hat_y);
+
+	input_report_key(ds->gamepad, BTN_WEST,
+			 state.buttons0 & DS_BUTTONS0_SQUARE);
+	input_report_key(ds->gamepad, BTN_SOUTH,
+			 state.buttons0 & DS_BUTTONS0_CROSS);
+	input_report_key(ds->gamepad, BTN_EAST,
+			 state.buttons0 & DS_BUTTONS0_CIRCLE);
+	input_report_key(ds->gamepad, BTN_NORTH,
+			 state.buttons0 & DS_BUTTONS0_TRIANGLE);
+	input_report_key(ds->gamepad, BTN_TL,
+			 state.buttons1 & DS_BUTTONS1_L1);
+	input_report_key(ds->gamepad, BTN_TR,
+			 state.buttons1 & DS_BUTTONS1_R1);
+	input_report_key(ds->gamepad, BTN_TL2,
+			 state.buttons1 & DS_BUTTONS1_L2);
+	input_report_key(ds->gamepad, BTN_TR2,
+			 state.buttons1 & DS_BUTTONS1_R2);
+	input_report_key(ds->gamepad, BTN_SELECT,
+			 state.buttons1 & DS_BUTTONS1_CREATE);
+	input_report_key(ds->gamepad, BTN_START,
+			 state.buttons1 & DS_BUTTONS1_OPTIONS);
+	input_report_key(ds->gamepad, BTN_THUMBL,
+			 state.buttons1 & DS_BUTTONS1_L3);
+	input_report_key(ds->gamepad, BTN_THUMBR,
+			 state.buttons1 & DS_BUTTONS1_R3);
+	input_report_key(ds->gamepad, BTN_MODE,
+			 state.buttons2 & DS_BUTTONS2_PS_HOME);
+	input_sync(ds->gamepad);
+	return 0;
 }
 
 static int dualsense_probe(struct hid_device *hdev,
@@ -232,6 +374,7 @@ static int dualsense_probe(struct hid_device *hdev,
 		return -ENOMEM;
 
 	ds->hdev = hdev;
+	hdev->version |= HID_PLAYSTATION_VERSION_PATCH;
 	/* Current DualSense and all Edge firmware use Sony's vibration-v2 flag.
 	 * A successfully retrieved old firmware report can opt back into v1. */
 	ds->use_vibration_v2 = true;
@@ -249,8 +392,8 @@ static int dualsense_probe(struct hid_device *hdev,
 		return ret;
 	}
 
-	/* Keep the descriptor-derived input mapping exposed by hid-generic. */
-	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
+	/* Enhanced Bluetooth reports require the PlayStation raw parser. */
+	ret = hid_hw_start(hdev, HID_CONNECT_HIDRAW);
 	if (ret) {
 		hid_err(hdev, "failed to start HID device: %d\n", ret);
 		return ret;
@@ -264,15 +407,16 @@ static int dualsense_probe(struct hid_device *hdev,
 	ds->opened = true;
 
 	dualsense_prime_features(ds);
+	ds->gamepad = dualsense_create_gamepad(ds);
+	if (IS_ERR(ds->gamepad)) {
+		ret = PTR_ERR(ds->gamepad);
+		ds->gamepad = NULL;
+		hid_err(hdev, "failed to register DualSense gamepad: %d\n", ret);
+		goto err_close;
+	}
 	ret = dualsense_send_report(ds, true);
 	if (ret < 0)
 		hid_warn(hdev, "initial output report failed: %d\n", ret);
-
-	ret = dualsense_init_ff(ds);
-	if (ret) {
-		hid_err(hdev, "failed to initialize force feedback: %d\n", ret);
-		goto err_close;
-	}
 
 	hid_info(hdev, "DualSense compatibility driver active\n");
 	return 0;
@@ -317,6 +461,7 @@ static struct hid_driver dualsense_driver = {
 	.id_table = dualsense_devices,
 	.probe = dualsense_probe,
 	.remove = dualsense_remove,
+	.raw_event = dualsense_raw_event,
 };
 
 static int __init dualsense_init(void)

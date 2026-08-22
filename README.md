@@ -264,11 +264,14 @@ is confirmed active. A failed driver probe or missing input node restores
 unusable.
 
 The compatibility module is selected by CPU architecture, kernel release,
-device-tree platform, and module vermagic. It preserves the descriptor-derived
-input mapping while adding native `EV_FF` rumble and the DualSense initialization
-needed by Bluetooth trigger/light reports. The rumble mode follows Sony's
-firmware feature version when available and defaults to the current vibration-v2
-protocol. Installation diagnostics are written to
+device-tree platform, and module vermagic. It backports Sony's standardized
+gamepad parser for both simple and enhanced DualSense input reports, along with
+native `EV_FF` rumble and the initialization needed by Bluetooth trigger/light
+reports. This is necessary because enabling advanced Bluetooth output is a
+one-way switch to enhanced input reports for that connection; webOS 4.4's
+generic descriptor path does not decode them reliably. The rumble mode follows
+Sony's firmware feature version when available and defaults to the current
+vibration-v2 protocol. Installation diagnostics are written to
 `/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
 `/tmp/chiaki-hid-playstation.log`.
 
