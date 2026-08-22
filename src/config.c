@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <json-c/json.h>
 #include <sys/stat.h>
 
@@ -27,6 +30,43 @@ static bool json_get_bool(struct json_object *obj, const char *key, bool def)
     return json_object_get_boolean(val);
 }
 
+static bool json_get_bool_strict(struct json_object *obj, const char *key, bool def)
+{
+    struct json_object *val;
+    if (!json_object_object_get_ex(obj, key, &val))
+        return def;
+    if (json_object_get_type(val) != json_type_boolean) {
+        fprintf(stderr, "[CONFIG] Warning: %s must be a boolean; using %s\n",
+                key, def ? "true" : "false");
+        return def;
+    }
+    return json_object_get_boolean(val);
+}
+
+static double json_get_double_range(struct json_object *obj, const char *key,
+                                    double def, double min, double max)
+{
+    struct json_object *val;
+    if (!json_object_object_get_ex(obj, key, &val))
+        return def;
+
+    enum json_type type = json_object_get_type(val);
+    if (type != json_type_double && type != json_type_int) {
+        fprintf(stderr, "[CONFIG] Warning: %s must be numeric; using %.2f\n",
+                key, def);
+        return def;
+    }
+
+    double value = json_object_get_double(val);
+    if (!isfinite(value) || value < min || value > max) {
+        fprintf(stderr,
+                "[CONFIG] Warning: %s must be between %.2f and %.2f; using %.2f\n",
+                key, min, max, def);
+        return def;
+    }
+    return value;
+}
+
 static int config_write_defaults(const char *path)
 {
     char dir[256];
@@ -45,6 +85,8 @@ static int config_write_defaults(const char *path)
         "  \"video_fps\": 60,\n"
         "  \"video_bitrate\": 15000,\n"
         "  \"video_codec\": \"h265\",\n"
+        "  \"packet_loss_max\": 0.05,\n"
+        "  \"idr_on_fec_failure\": true,\n"
         "  \"audio_volume\": 100,\n"
         "  \"wakeup\": true,\n"
         "  \"ps5_mac\": \"\",\n"
@@ -87,6 +129,9 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->video_height     = json_get_int(root,  "video_height",     1080);
     cfg->video_fps        = json_get_int(root,  "video_fps",        60);
     cfg->video_bitrate    = json_get_int(root,  "video_bitrate",    15000);
+    cfg->packet_loss_max  = json_get_double_range(root, "packet_loss_max",
+                                                   0.05, 0.0, 1.0);
+    cfg->idr_on_fec_failure = json_get_bool_strict(root, "idr_on_fec_failure", true);
     cfg->audio_volume     = json_get_int(root,  "audio_volume",     100);
     cfg->ps5              = json_get_bool(root, "ps5",              true);
     cfg->hw_decode        = json_get_bool(root, "hw_decode",        false);
@@ -95,6 +140,39 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->ps5_mac          = json_get_str(root,  "ps5_mac");
     cfg->wakeup_delay_ms  = json_get_int(root,  "wakeup_delay_ms",  60000);
     cfg->sleep_on_exit    = json_get_bool(root, "sleep_on_exit",    true);
+
+    if (cfg->video_width <= 0 || cfg->video_height <= 0) {
+        fprintf(stderr, "[CONFIG] Warning: invalid video dimensions; using 1920x1080\n");
+        cfg->video_width = 1920;
+        cfg->video_height = 1080;
+    } else if (cfg->video_width > 1920 || cfg->video_height > 1080) {
+        fprintf(stderr,
+                "[CONFIG] Warning: %dx%d exceeds Chiaki's 1080p ceiling; using 1920x1080\n",
+                cfg->video_width, cfg->video_height);
+        cfg->video_width = 1920;
+        cfg->video_height = 1080;
+    }
+    if (cfg->video_fps != 30 && cfg->video_fps != 60) {
+        fprintf(stderr, "[CONFIG] Warning: video_fps must be 30 or 60; using 60\n");
+        cfg->video_fps = 60;
+    }
+    if (cfg->video_bitrate < 2000 || cfg->video_bitrate > 100000) {
+        fprintf(stderr,
+                "[CONFIG] Warning: video_bitrate must be 2000-100000 kbps; using 15000\n");
+        cfg->video_bitrate = 15000;
+    }
+
+    if (!cfg->video_codec ||
+        (strcmp(cfg->video_codec, "h264") != 0 &&
+         strcmp(cfg->video_codec, "h265") != 0 &&
+         strcmp(cfg->video_codec, "h265_hdr") != 0))
+    {
+        if (cfg->video_codec)
+            fprintf(stderr, "[CONFIG] Warning: unknown video_codec '%s'; using h265\n",
+                    cfg->video_codec);
+        free(cfg->video_codec);
+        cfg->video_codec = strdup("h265");
+    }
 
     /* Early fork imports wrote 30 seconds even though the application default
      * and documentation use 60. Keep those existing installations reliable
@@ -150,10 +228,12 @@ int config_load(AppConfig *cfg, const char *path)
     json_object_put(root);
 
     fprintf(stderr, "[CONFIG] Loaded: host=%s ps5=%d %dx%d@%dfps %dkbps "
-            "wakeup=%d psn_wakeup=%s sleep_on_exit=%d log_level=0x%x\n",
+            "loss_cap=%.2f idr_on_fec=%d wakeup=%d psn_wakeup=%s "
+            "sleep_on_exit=%d log_level=0x%x\n",
             cfg->host ? cfg->host : "(null)", cfg->ps5,
             cfg->video_width, cfg->video_height,
             cfg->video_fps, cfg->video_bitrate,
+            cfg->packet_loss_max, cfg->idr_on_fec_failure,
             cfg->wakeup,
             cfg->psn_refresh_token ? "YES" : "NO",
             cfg->sleep_on_exit, cfg->log_level);

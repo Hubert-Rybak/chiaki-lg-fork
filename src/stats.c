@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "stats.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <chiaki/session.h> // for CHIAKI_CODEC_* constants
 
@@ -16,11 +19,23 @@ void stats_reset(StreamStatsCounters *c)
     if(!c)
         return;
     atomic_store_explicit(&c->video_bytes, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_samples, 0, memory_order_relaxed);
     atomic_store_explicit(&c->video_frames, 0, memory_order_relaxed);
-    atomic_store_explicit(&c->video_feed_fail, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_frames_lost, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_frames_recovered, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_fec_failures, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_feed_not_ready, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_feed_keyframe_requests, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_feed_errors, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_idr_requests, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->reconnects, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->video_last_frame_ms, 0, memory_order_relaxed);
 
     atomic_store_explicit(&c->audio_bytes, 0, memory_order_relaxed);
     atomic_store_explicit(&c->audio_packets, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->audio_feed_not_ready, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->audio_feed_overflows, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->audio_feed_errors, 0, memory_order_relaxed);
 
     atomic_store_explicit(&c->video_latency_ms, -1, memory_order_relaxed);
 
@@ -77,19 +92,31 @@ static int query_video_render_buf_frames(void)
 #endif
 }
 
-void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_t now_ms)
+void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint64_t now_ms)
 {
     if(!o || !c || !o->enabled)
         return;
 
-    const uint32_t sample_period_ms = 500;
-    if(o->last_sample_ms != 0 && (uint32_t)(now_ms - o->last_sample_ms) < sample_period_ms)
+    const uint64_t sample_period_ms = 500;
+    if(o->last_sample_ms != 0 && now_ms - o->last_sample_ms < sample_period_ms)
         return;
 
     uint64_t vbytes = atomic_load_explicit(&c->video_bytes, memory_order_relaxed);
     uint64_t abytes = atomic_load_explicit(&c->audio_bytes, memory_order_relaxed);
     uint64_t vframes = atomic_load_explicit(&c->video_frames, memory_order_relaxed);
-    uint64_t vfail = atomic_load_explicit(&c->video_feed_fail, memory_order_relaxed);
+    uint64_t vsamples = atomic_load_explicit(&c->video_samples, memory_order_relaxed);
+    uint64_t vlost = atomic_load_explicit(&c->video_frames_lost, memory_order_relaxed);
+    uint64_t vrecovered = atomic_load_explicit(&c->video_frames_recovered, memory_order_relaxed);
+    uint64_t vfec = atomic_load_explicit(&c->video_fec_failures, memory_order_relaxed);
+    uint64_t vnotready = atomic_load_explicit(&c->video_feed_not_ready, memory_order_relaxed);
+    uint64_t vkeyreq = atomic_load_explicit(&c->video_feed_keyframe_requests, memory_order_relaxed);
+    uint64_t verrors = atomic_load_explicit(&c->video_feed_errors, memory_order_relaxed);
+    uint64_t idr_requests = atomic_load_explicit(&c->video_idr_requests, memory_order_relaxed);
+    uint64_t reconnects = atomic_load_explicit(&c->reconnects, memory_order_relaxed);
+    uint64_t last_frame_ms = atomic_load_explicit(&c->video_last_frame_ms, memory_order_relaxed);
+    uint64_t anotready = atomic_load_explicit(&c->audio_feed_not_ready, memory_order_relaxed);
+    uint64_t aoverflows = atomic_load_explicit(&c->audio_feed_overflows, memory_order_relaxed);
+    uint64_t aerrors = atomic_load_explicit(&c->audio_feed_errors, memory_order_relaxed);
 
     int vw = atomic_load_explicit(&c->video_w, memory_order_relaxed);
     int vh = atomic_load_explicit(&c->video_h, memory_order_relaxed);
@@ -99,7 +126,7 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
 
     float dt = 0.0f;
     if(o->last_sample_ms != 0)
-        dt = (float)((uint32_t)(now_ms - o->last_sample_ms)) / 1000.0f;
+        dt = (float)(now_ms - o->last_sample_ms) / 1000.0f;
 
     if(dt > 0.0f)
     {
@@ -113,7 +140,25 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
         o->fps = (float)(df / dt);
     }
 
-    o->feed_fail_total = vfail;
+    o->feed_fail_total = vnotready + vkeyreq + verrors;
+    o->last_frame_age_ms = last_frame_ms > 0 && now_ms >= last_frame_ms
+        ? now_ms - last_frame_ms
+        : 0;
+
+    const uint64_t loss_sample_period_ms = 2000;
+    if(o->last_loss_sample_ms == 0 ||
+       now_ms - o->last_loss_sample_ms >= loss_sample_period_ms)
+    {
+        uint64_t sample_delta = vsamples - o->last_video_samples;
+        uint64_t lost_delta = vlost - o->last_video_lost;
+        uint64_t total = sample_delta + lost_delta;
+        o->loss_percent = total > 0
+            ? (float)((double)lost_delta * 100.0 / (double)total)
+            : 0.0f;
+        o->last_loss_sample_ms = now_ms;
+        o->last_video_samples = vsamples;
+        o->last_video_lost = vlost;
+    }
 
     // Estimated pipeline buffer latency (video render queue). This is only a proxy for
     // "how much video is buffered", not a full end-to-end network latency.
@@ -133,7 +178,6 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
     o->last_video_bytes = vbytes;
     o->last_audio_bytes = abytes;
     o->last_video_frames = vframes;
-    o->last_video_fail = vfail;
 
     // Build display string (kept compact for TV readability)
     // Note: total bitrate here is based on payload sizes from Chiaki callbacks.
@@ -151,10 +195,34 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
         "Bitrate: %.2f Mbps  (V %.2f / A %.2f)\n"
         "FPS: %.1f\n"
         "%s"
-        "Video feed errors: %llu\n",
+        "Frame age: %llu ms\n"
+        "Loss (2s): %.2f%%  lost %llu  recovered %llu  FEC %llu\n"
+        "Decoder: not-ready %llu  keyframe %llu  errors %llu\n"
+        "Audio: not-ready %llu  overflow %llu  errors %llu\n"
+        "Recovery: IDR %llu  reconnects %llu\n",
         vw, vh, codec_to_str(vcodec),
         o->mbps_total, o->mbps_video, o->mbps_audio,
         o->fps,
         latency_line,
-        (unsigned long long)o->feed_fail_total);
+        (unsigned long long)o->last_frame_age_ms,
+        o->loss_percent,
+        (unsigned long long)vlost,
+        (unsigned long long)vrecovered,
+        (unsigned long long)vfec,
+        (unsigned long long)vnotready,
+        (unsigned long long)vkeyreq,
+        (unsigned long long)verrors,
+        (unsigned long long)anotready,
+        (unsigned long long)aoverflows,
+        (unsigned long long)aerrors,
+        (unsigned long long)idr_requests,
+        (unsigned long long)reconnects);
+}
+
+uint64_t stats_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
 }

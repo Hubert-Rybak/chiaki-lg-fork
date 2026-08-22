@@ -1,9 +1,12 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <inttypes.h>
 #include <unistd.h>
 #include <time.h>
@@ -38,6 +41,7 @@
 #include "input.h"
 #include "ui.h"
 #include "stats.h"
+#include "stream_health.h"
 #include "config_import.h"
 #include "app_id.h"
 #include "root_feedback.h"
@@ -46,26 +50,42 @@
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
 
+#ifndef CHIAKI_NG_REVISION
+#define CHIAKI_NG_REVISION "unknown"
+#endif
+#ifndef SS4S_REVISION
+#define SS4S_REVISION "unknown"
+#endif
+
 // ── Global state ──────────────────────────────────────────────────────────────
 
-// g_should_exit: set by SDL_QUIT (Home button) or SIGTERM — fully exit, no reconnect
-// g_session_ended: set by CHIAKI_EVENT_QUIT — session finished, check reason for reconnect
-static volatile bool g_should_exit   = false;
-static volatile bool g_session_ended = false;
-static volatile ChiakiQuitReason g_quit_reason = CHIAKI_QUIT_REASON_NONE;
-static volatile bool g_ps5_sleeping  = false;  // PS5 initiated Rest Mode
+// Session callbacks run on Chiaki threads. Keep their shared state atomic; the
+// signal handler only touches sig_atomic_t and is observed by the main thread.
+static atomic_bool g_should_exit   = ATOMIC_VAR_INIT(false);
+static atomic_bool g_session_ended = ATOMIC_VAR_INIT(false);
+static atomic_int  g_quit_reason   = ATOMIC_VAR_INIT(CHIAKI_QUIT_REASON_NONE);
+static atomic_bool g_ps5_sleeping  = ATOMIC_VAR_INIT(false);
+static volatile sig_atomic_t g_signal_exit = 0;
 
 static ChiakiSession  g_session;
 static SDL_Window    *g_window   = NULL;
 static SDL_Renderer  *g_renderer = NULL;
 
-// Set to true once we receive the first video sample.
-// (Written from Chiaki's video callback thread; read from the SDL loop.)
-volatile bool g_have_video_frame = false;
-
 // Global log file — accessible via app_log() from audio.c / video.c
 FILE *g_log_file   = NULL;
 int   g_log_level  = 0x1c;  // default: INFO|WARNING|ERROR until config loads
+
+static bool app_exit_requested(void)
+{
+    return g_signal_exit != 0 ||
+           atomic_load_explicit(&g_should_exit, memory_order_acquire);
+}
+
+static void app_request_exit(void)
+{
+    atomic_store_explicit(&g_should_exit, true, memory_order_release);
+    atomic_store_explicit(&g_session_ended, true, memory_order_release);
+}
 
 // ── Shared log helpers ────────────────────────────────────────────────────────
 
@@ -152,26 +172,38 @@ static void session_event_cb(ChiakiEvent *event, void *user)
     case CHIAKI_EVENT_TRIGGER_INTENSITY:
         /* Applied asynchronously by input_handle_session_event(). */
         break;
+    case CHIAKI_EVENT_VIDEO_FEC_FAILURE:
+        atomic_fetch_add_explicit(&g_stream_stats.video_fec_failures, 1,
+                                  memory_order_relaxed);
+        if (event->video_fec_failure.idr_request_sent)
+            atomic_fetch_add_explicit(&g_stream_stats.video_idr_requests, 1,
+                                      memory_order_relaxed);
+        app_log("[VIDEO] FEC failure frame=%d automatic_idr=%d\n",
+                event->video_fec_failure.frame_index,
+                event->video_fec_failure.idr_request_sent ? 1 : 0);
+        break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
         app_log_always("[APP] Session quit: reason=%d (%s) reason_str=%s\n",
                 event->quit.reason,
                 chiaki_quit_reason_string(event->quit.reason),
                 event->quit.reason_str ? event->quit.reason_str : "(none)");
-        g_quit_reason  = event->quit.reason;
-        g_session_ended = true;
+        atomic_store_explicit(&g_quit_reason, event->quit.reason,
+                              memory_order_release);
+        atomic_store_explicit(&g_session_ended, true, memory_order_release);
         // Detect PS5 Rest Mode via reason_str (no dedicated enum in this chiaki-ng version).
         // When the PS5 enters Rest Mode mid-stream it sends "Server shutting down".
         // Set flags so the event loop exits and we do not reconnect.
-        if (event->quit.reason_str &&
-            (strstr(event->quit.reason_str, "sleep") ||
-             strstr(event->quit.reason_str, "standby") ||
-             strstr(event->quit.reason_str, "shutting down")))
+        if (event->quit.reason == CHIAKI_QUIT_REASON_STREAM_CONNECTION_REMOTE_SHUTDOWN ||
+            (event->quit.reason_str &&
+             (strstr(event->quit.reason_str, "sleep") ||
+              strstr(event->quit.reason_str, "standby") ||
+              strstr(event->quit.reason_str, "shutting down"))))
         {
             app_log("[APP] PS5 entered Rest Mode (%s) -- exiting\n",
                     event->quit.reason_str);
-            g_ps5_sleeping = true;
-            g_should_exit  = true;
+            atomic_store_explicit(&g_ps5_sleeping, true, memory_order_release);
+            atomic_store_explicit(&g_should_exit, true, memory_order_release);
         }
         break;
     default:
@@ -184,9 +216,22 @@ static void session_event_cb(ChiakiEvent *event, void *user)
 // Treat it as a deliberate exit — no reconnect.
 static void sig_handler(int sig)
 {
-    app_log_always("[APP] Signal %d received — exiting\n", sig);
-    g_should_exit   = true;
-    g_session_ended = true;
+    (void)sig;
+    g_signal_exit = 1;
+}
+
+static void ss4s_log_cb(SS4S_LogLevel level, const char *tag, const char *fmt, ...)
+{
+    char message[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    if (level <= SS4S_LogLevelWarn)
+        app_log_always("[SS4S][%s][%d] %s\n", tag ? tag : "?", level, message);
+    else
+        app_log("[SS4S][%s][%d] %s\n", tag ? tag : "?", level, message);
 }
 
 // ── Wakeup ────────────────────────────────────────────────────────────────────
@@ -991,15 +1036,19 @@ static const char *detect_webos_ss4s_module(void)
 // We reconnect on transient network errors, not on deliberate user/PS5 quits.
 static bool should_reconnect(ChiakiQuitReason reason)
 {
-    switch (reason) {
-    // These are deliberate stops — don't reconnect.
-    case CHIAKI_QUIT_REASON_STOPPED:
+    if (atomic_load_explicit(&g_ps5_sleeping, memory_order_acquire))
         return false;
 
-
-    // Network / stream errors — worth a retry, unless PS5 went to Rest Mode.
+    switch (reason) {
+    case CHIAKI_QUIT_REASON_STOPPED:
+    case CHIAKI_QUIT_REASON_STREAM_CONNECTION_REMOTE_SHUTDOWN:
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE:
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_CRASH:
+    case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_VERSION_MISMATCH:
+    case CHIAKI_QUIT_REASON_PSN_REGIST_FAILED:
+        return false;
     default:
-        return !g_ps5_sleeping;
+        return true;
     }
 }
 
@@ -1009,18 +1058,187 @@ static bool should_reconnect(ChiakiQuitReason reason)
 static const char *session_request_failure_message(ChiakiQuitReason reason)
 {
     switch (reason) {
-    case CHIAKI_QUIT_REASON_SESSION_REQUEST_UNKNOWN:
-    case CHIAKI_QUIT_REASON_SESSION_REQUEST_CONNECTION_REFUSED:
-        return "Connection failed. Check PS5 IP and console status.";
     case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE:
         return "Remote Play is already in use on the PS5.";
     case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_CRASH:
         return "The PS5 Remote Play service reported an error.";
     case CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_VERSION_MISMATCH:
         return "PS5 protocol mismatch. Update the app and retry.";
+    case CHIAKI_QUIT_REASON_PSN_REGIST_FAILED:
+        return "Registration was rejected. Import the console config again.";
     default:
         return NULL;
     }
+}
+
+typedef struct StreamBackend
+{
+    SS4S_Player *player;
+    VideoContext *video;
+    AudioContext *audio;
+} StreamBackend;
+
+static const char *stream_codec_name(int codec)
+{
+    switch (codec) {
+    case CHIAKI_CODEC_H265_HDR: return "H.265 HDR";
+    case CHIAKI_CODEC_H265: return "H.265";
+    case CHIAKI_CODEC_H264: return "H.264";
+    default: return "unknown";
+    }
+}
+
+static bool select_stream_profile(const AppConfig *cfg,
+                                  const SS4S_VideoCapabilities *caps,
+                                  int *codec_out, int *bitrate_out,
+                                  char *error, size_t error_size)
+{
+    const bool has_h264 = (caps->codecs & SS4S_VIDEO_H264) != 0;
+    const bool has_h265 = (caps->codecs & SS4S_VIDEO_H265) != 0;
+    const bool force_h264 = cfg->video_codec && !strcmp(cfg->video_codec, "h264");
+    const bool want_hdr = cfg->video_codec && !strcmp(cfg->video_codec, "h265_hdr");
+    int codec = CHIAKI_CODEC_H264;
+
+    if (!cfg->ps5) {
+        if (!has_h264) {
+            snprintf(error, error_size, "The SS4S backend does not support PS4 H.264 video.");
+            return false;
+        }
+    } else if (want_hdr && has_h265 && caps->hdr) {
+        codec = CHIAKI_CODEC_H265_HDR;
+    } else if (!force_h264 && has_h265) {
+        codec = CHIAKI_CODEC_H265;
+        if (want_hdr)
+            app_log_always("[STREAM] HDR unavailable; falling back to H.265 SDR\n");
+    } else if (has_h264) {
+        codec = CHIAKI_CODEC_H264;
+        if (!force_h264)
+            app_log_always("[STREAM] HEVC unavailable; falling back to H.264\n");
+    } else if (has_h265) {
+        codec = CHIAKI_CODEC_H265;
+        app_log_always("[STREAM] H.264 unavailable; using H.265\n");
+    } else {
+        snprintf(error, error_size, "The SS4S backend supports neither H.264 nor H.265.");
+        return false;
+    }
+
+    int bitrate = cfg->video_bitrate;
+    if (caps->maxBitrate > 0 &&
+        (unsigned int)bitrate > caps->maxBitrate) {
+        app_log_always("[STREAM] Clamping bitrate from %d to backend maximum %u kbps\n",
+                       bitrate, caps->maxBitrate);
+        bitrate = (int)caps->maxBitrate;
+    }
+
+    *codec_out = codec;
+    *bitrate_out = bitrate;
+    app_log_always("[STREAM] Effective profile: %dx%d@%d %s %d kbps\n",
+                   cfg->video_width, cfg->video_height, cfg->video_fps,
+                   stream_codec_name(codec), bitrate);
+    return true;
+}
+
+static bool stream_backend_open(StreamBackend *backend, const AppConfig *cfg,
+                                int codec, VideoInitResult *video_result)
+{
+    memset(backend, 0, sizeof(*backend));
+    if (video_result)
+        *video_result = VIDEO_INIT_ERROR;
+
+    backend->player = SS4S_PlayerOpen();
+    if (!backend->player) {
+        app_log_always("[SS4S] PlayerOpen failed\n");
+        return false;
+    }
+
+    SS4S_PlayerSetWaitAudioVideoReady(backend->player, true);
+    SS4S_PlayerSetViewportSize(backend->player, cfg->video_width, cfg->video_height);
+
+    backend->video = video_init(backend->player, cfg->video_width,
+                                cfg->video_height, cfg->video_fps,
+                                codec, video_result);
+    if (!backend->video)
+        return false;
+
+    backend->audio = audio_init(backend->player);
+    if (!backend->audio) {
+        app_log_always("[AUDIO] Could not allocate audio context\n");
+        return false;
+    }
+
+    return true;
+}
+
+static void stream_backend_close(StreamBackend *backend)
+{
+    if (!backend)
+        return;
+    audio_fini(backend->audio);
+    video_fini(backend->video);
+    if (backend->player)
+        SS4S_PlayerClose(backend->player);
+    memset(backend, 0, sizeof(*backend));
+}
+
+static void send_idr_request(const char *reason)
+{
+    atomic_fetch_add_explicit(&g_stream_stats.video_idr_requests, 1,
+                              memory_order_relaxed);
+    ChiakiErrorCode err = chiaki_session_request_idr(&g_session);
+    app_log_always("[RECOVERY] IDR request (%s): %s\n", reason,
+                   chiaki_error_string(err));
+}
+
+static void log_stream_summary(int attempt, ChiakiQuitReason reason)
+{
+    app_log_always(
+        "[STREAM] Attempt %d summary: reason=%s samples=%llu frames=%llu "
+        "lost=%llu recovered=%llu fec=%llu video_not_ready=%llu "
+        "video_keyframe=%llu video_errors=%llu audio_not_ready=%llu "
+        "audio_overflow=%llu audio_errors=%llu idr=%llu reconnects=%d\n",
+        attempt, chiaki_quit_reason_string(reason),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_samples, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_frames, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_frames_lost, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_frames_recovered, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_fec_failures, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_feed_not_ready, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_feed_keyframe_requests, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_feed_errors, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.audio_feed_not_ready, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.audio_feed_overflows, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.audio_feed_errors, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_stream_stats.video_idr_requests, memory_order_relaxed),
+        attempt > 0 ? attempt - 1 : 0);
+}
+
+static bool wait_for_reconnect(SDL_Renderer *renderer, uint32_t delay_ms)
+{
+    const uint64_t deadline = stats_monotonic_ms() + delay_ms;
+    while (!app_exit_requested())
+    {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT ||
+                (event.type == SDL_KEYDOWN && webos_event_is_back_or_red(&event.key)))
+            {
+                app_request_exit();
+                return false;
+            }
+        }
+
+        uint64_t now = stats_monotonic_ms();
+        if (now >= deadline)
+            return true;
+
+        unsigned int seconds = (unsigned int)((deadline - now + 999u) / 1000u);
+        char message[96];
+        snprintf(message, sizeof(message), "Reconnecting in %u s (Back/Red cancels)", seconds);
+        ui_render_loading(renderer, message);
+        SDL_RenderPresent(renderer);
+        SDL_Delay(50);
+    }
+    return false;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -1035,6 +1253,9 @@ int main(int argc, char *argv[])
     chdir(CHIAKI_APP_DIR);
     setenv("SS4S_CONFIG_FILE", "./lib/ss4s_modules.ini", 1);
     // SS4S_MODULE is set after config load — auto-detection picks ndl-webos4 or ndl-webos5.
+    // The pinned SS4S modules read APPID; retain SS4S_APP_ID for compatibility
+    // with older builds that used the prefixed name.
+    setenv("APPID",             CHIAKI_APP_ID,    1);
     setenv("SS4S_APP_ID",      CHIAKI_APP_ID,    1);
     /* ========================================= */
 
@@ -1052,9 +1273,18 @@ int main(int argc, char *argv[])
         app_log("\n\n========== NEW LAUNCH %s ==========\n", tbuf);
     }
 
-    app_log("[APP] SS4S_MODULE=%s\n",      getenv("SS4S_MODULE"));
-    app_log("[APP] SS4S_CONFIG_FILE=%s\n", getenv("SS4S_CONFIG_FILE"));
-    app_log("[APP] SS4S_APP_ID=%s\n",      getenv("SS4S_APP_ID"));
+    const char *ss4s_module_env = getenv("SS4S_MODULE");
+    const char *ss4s_config_env = getenv("SS4S_CONFIG_FILE");
+    const char *app_id_env = getenv("APPID");
+    const char *ss4s_app_id_env = getenv("SS4S_APP_ID");
+    app_log("[APP] SS4S_MODULE=%s\n",
+            ss4s_module_env ? ss4s_module_env : "(unset)");
+    app_log("[APP] SS4S_CONFIG_FILE=%s\n",
+            ss4s_config_env ? ss4s_config_env : "(unset)");
+    app_log("[APP] APPID=%s\n",
+            app_id_env ? app_id_env : "(unset)");
+    app_log("[APP] SS4S_APP_ID=%s\n",
+            ss4s_app_id_env ? ss4s_app_id_env : "(unset)");
 
     const char *config_path = CONFIG_PATH;
     if (argc > 1 && argv[1][0] != '{' && argv[1][0] != '\0')
@@ -1086,17 +1316,6 @@ int main(int argc, char *argv[])
 
     app_log_always("[APP] Connecting to %s  ps5=%d  %dx%d@%dfps\n",
             cfg.host, cfg.ps5, cfg.video_width, cfg.video_height, cfg.video_fps);
-
-    // ── SS4S module auto-detection ───────────────────────────────────────────
-    // If config says "auto" (the default), detect the webOS version now and
-    // replace with the appropriate module name before anything touches SS4S.
-    if (cfg.ss4s_module && strcmp(cfg.ss4s_module, "auto") == 0) {
-        free(cfg.ss4s_module);
-        cfg.ss4s_module = strdup(detect_webos_ss4s_module());
-    }
-    // SS4S reads SS4S_MODULE from the environment internally — keep it in sync.
-    setenv("SS4S_MODULE", cfg.ss4s_module, 1);
-    app_log_always("[APP] SS4S module: %s\n", cfg.ss4s_module);
 
     // ── SSL / cURL init ──────────────────────────────────────────────────────
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1218,10 +1437,9 @@ int main(int argc, char *argv[])
     // ── Launcher UI (shown on every launch) ───────────────────────────────
 
 show_launcher:
-    g_session_ended = false;
-    g_quit_reason = CHIAKI_QUIT_REASON_NONE;
-    g_ps5_sleeping = false;
-    g_have_video_frame = false;
+    atomic_store_explicit(&g_session_ended, false, memory_order_release);
+    atomic_store_explicit(&g_quit_reason, CHIAKI_QUIT_REASON_NONE, memory_order_release);
+    atomic_store_explicit(&g_ps5_sleeping, false, memory_order_release);
 
     app_log("[APP] Showing launcher UI\n");
     SDL_ShowCursor(SDL_ENABLE);
@@ -1245,7 +1463,7 @@ show_launcher:
         goto cleanup_sdl;
     }
 
-    if (g_should_exit)
+    if (app_exit_requested())
         goto cleanup_sdl;
 
     SDL_ShowCursor(SDL_DISABLE);
@@ -1253,25 +1471,86 @@ show_launcher:
     // The launcher can update logging settings and reload cfg in place.
     chiaki_log_init(&chiaki_log, cfg.log_level, log_cb, NULL);
 
+    // The launcher can also import a config that restores "auto", so resolve
+    // the module after every launcher pass and before SS4S sees the value.
+    if (cfg.ss4s_module && strcmp(cfg.ss4s_module, "auto") == 0) {
+        free(cfg.ss4s_module);
+        cfg.ss4s_module = strdup(detect_webos_ss4s_module());
+    }
+    if (!cfg.ss4s_module) {
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "Could not select a media backend.");
+        goto show_launcher;
+    }
+    setenv("SS4S_MODULE", cfg.ss4s_module, 1);
+    app_log_always("[APP] SS4S module: %s\n", cfg.ss4s_module);
+
     bool return_to_launcher = false;
 
-    // ── SS4S init ─────────────────────────────────────────────────────────────
+    // ── SS4S init and capability negotiation ─────────────────────────────────
+    app_log_always("[APP] Streaming revisions: chiaki-ng=%s SS4S=%s\n",
+                   CHIAKI_NG_REVISION, SS4S_REVISION);
     app_log("[APP] Initialising SS4S (module: %s)\n", cfg.ss4s_module);
     SS4S_Config ss4s_cfg = {
         .audioDriver = cfg.ss4s_module,
         .videoDriver = cfg.ss4s_module,
+        .loggingFunction = ss4s_log_cb,
     };
-    SS4S_Init(argc, argv, &ss4s_cfg);
-    SS4S_PostInit(argc, argv);
-
-    SS4S_Player *ss4s_player = SS4S_PlayerOpen();
-    if (!ss4s_player)
+    bool ss4s_initialized = false;
+    int ss4s_rc = SS4S_Init(argc, argv, &ss4s_cfg);
+    ss4s_initialized = true;
+    if (ss4s_rc != 0 || SS4S_PostInit(argc, argv) != 0 ||
+        !SS4S_GetVideoModuleName() || !SS4S_GetAudioModuleName())
     {
-        app_log("[APP] SS4S_PlayerOpen failed\n");
-        goto cleanup_sdl;
+        app_log_always("[SS4S] Backend initialization failed (rc=%d video=%s audio=%s)\n",
+                       ss4s_rc,
+                       SS4S_GetVideoModuleName() ? SS4S_GetVideoModuleName() : "missing",
+                       SS4S_GetAudioModuleName() ? SS4S_GetAudioModuleName() : "missing");
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "Could not initialize the %s media backend.", cfg.ss4s_module);
+        return_to_launcher = true;
+        goto cleanup_ss4s;
     }
-    SS4S_PlayerSetWaitAudioVideoReady(ss4s_player, true);
-    SS4S_PlayerSetViewportSize(ss4s_player, cfg.video_width, cfg.video_height);
+
+    SS4S_SetLogLevel((cfg.log_level & CHIAKI_LOG_INFO)
+        ? SS4S_LogLevelInfo : SS4S_LogLevelWarn);
+
+    SS4S_VideoCapabilities video_caps;
+    SS4S_AudioCapabilities audio_caps;
+    memset(&video_caps, 0, sizeof(video_caps));
+    memset(&audio_caps, 0, sizeof(audio_caps));
+    if (!SS4S_GetVideoCapabilities(&video_caps))
+    {
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "The media backend did not report video capabilities.");
+        return_to_launcher = true;
+        goto cleanup_ss4s;
+    }
+    if (!SS4S_GetAudioCapabilitiesByCodecs(&audio_caps, SS4S_AUDIO_OPUS) ||
+        !(audio_caps.codecs & SS4S_AUDIO_OPUS))
+    {
+        snprintf(launcher_message, sizeof(launcher_message),
+                 "The media backend does not support Remote Play Opus audio.");
+        return_to_launcher = true;
+        goto cleanup_ss4s;
+    }
+
+    app_log_always("[SS4S] Capabilities: codecs=0x%x hdr=%d max=%ux%u@%u "
+                   "max_bitrate=%u suggested=%u audio=0x%x channels=%u\n",
+                   (unsigned int)video_caps.codecs, video_caps.hdr,
+                   video_caps.maxWidth, video_caps.maxHeight, video_caps.maxFps,
+                   video_caps.maxBitrate, video_caps.suggestedBitrate,
+                   (unsigned int)audio_caps.codecs, audio_caps.maxChannels);
+
+    int requested_codec = CHIAKI_CODEC_H264;
+    int effective_bitrate = cfg.video_bitrate;
+    if (!select_stream_profile(&cfg, &video_caps, &requested_codec,
+                               &effective_bitrate,
+                               launcher_message, sizeof(launcher_message)))
+    {
+        return_to_launcher = true;
+        goto cleanup_ss4s;
+    }
 
     // ── Exported window (webOS 5+) ─────────────────────────────────────────
     // On webOS 5+, NDL requires the app to pass its SDL window's native webOS
@@ -1301,53 +1580,6 @@ show_launcher:
             app_log("[APP] SDL_GetWindowWMInfo FAILED: %s\n", SDL_GetError());
         }
     }
-    app_log("[APP] SS4S player opened\n");
-
-    // ── Video / Audio init ────────────────────────────────────────────────────
-    // Determine codec once - used by both video_init (SS4S) and info.video_profile.codec (Chiaki).
-    bool force_h264    = cfg.video_codec && strcmp(cfg.video_codec, "h264") == 0;
-    bool want_h265_hdr = cfg.video_codec && strcmp(cfg.video_codec, "h265_hdr") == 0;
-
-    int requested_codec = CHIAKI_CODEC_H264;
-    if(cfg.ps5)
-    {
-        if(force_h264)
-            requested_codec = CHIAKI_CODEC_H264;
-        else if(want_h265_hdr)
-            requested_codec = CHIAKI_CODEC_H265_HDR;
-        else
-            requested_codec = CHIAKI_CODEC_H265;
-    }
-    else
-    {
-        // PS4 sessions do not support HEVC/HDR in Chiaki; force H.264.
-        requested_codec = CHIAKI_CODEC_H264;
-        if(want_h265_hdr)
-            app_log_always("[APP] video_codec=h265_hdr requested but ps5=false - forcing H.264\n");
-    }
-
-    app_log("[APP] Calling video_init...\n");
-    VideoContext *video_ctx = video_init(ss4s_player, cfg.video_width, cfg.video_height, cfg.video_fps, requested_codec);
-    if (!video_ctx)
-    {
-        app_log("[APP] video_init failed\n");
-        SS4S_PlayerClose(ss4s_player);
-        SS4S_Quit();
-        goto cleanup_sdl;
-    }
-    app_log("[APP] video_init OK\n");
-
-    AudioContext *audio_ctx = audio_init(ss4s_player);
-    if (!audio_ctx)
-    {
-        app_log("[APP] audio_init failed\n");
-        video_fini(video_ctx);
-        SS4S_PlayerClose(ss4s_player);
-        SS4S_Quit();
-        goto cleanup_sdl;
-    }
-    app_log("[APP] audio_init OK\n");
-
     // ── Build connect info (done once, reused across reconnects) ──────────────
     ChiakiConnectInfo info;
     memset(&info, 0, sizeof(info));
@@ -1360,13 +1592,14 @@ show_launcher:
     decoded_len = sizeof(info.regist_key);
     if (chiaki_base64_decode(cfg.registered_key_b64,
                              strlen(cfg.registered_key_b64),
-                             info.regist_key, &decoded_len) != CHIAKI_ERR_SUCCESS)
+                             (uint8_t *)info.regist_key,
+                             &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
         app_log("[APP] Failed to decode registered_key\n");
         snprintf(launcher_message, sizeof(launcher_message),
                  "Registration key is invalid. Import config again.");
         return_to_launcher = true;
-        goto cleanup_session_ctx;
+        goto cleanup_ss4s;
     }
     decoded_len = sizeof(info.morning);
     if (chiaki_base64_decode(cfg.rp_key_b64,
@@ -1377,7 +1610,7 @@ show_launcher:
         snprintf(launcher_message, sizeof(launcher_message),
                  "Remote Play key is invalid. Import config again.");
         return_to_launcher = true;
-        goto cleanup_session_ctx;
+        goto cleanup_ss4s;
     }
     uint8_t account_id_raw[8];
     decoded_len = sizeof(account_id_raw);
@@ -1389,37 +1622,44 @@ show_launcher:
         snprintf(launcher_message, sizeof(launcher_message),
                  "PSN account ID is invalid. Import config again.");
         return_to_launcher = true;
-        goto cleanup_session_ctx;
+        goto cleanup_ss4s;
     }
     memcpy(&info.psn_account_id, account_id_raw, sizeof(info.psn_account_id));
 
     info.video_profile.width   = cfg.video_width;
     info.video_profile.height  = cfg.video_height;
     info.video_profile.max_fps = cfg.video_fps;
-    info.video_profile.bitrate = cfg.video_bitrate;
+    info.video_profile.bitrate = effective_bitrate;
 
     info.video_profile.codec = requested_codec;
+    info.video_profile_auto_downgrade = true;
+    info.packet_loss_max = cfg.packet_loss_max;
+    info.enable_idr_on_fec_failure = cfg.idr_on_fec_failure;
 
     // ── Session / reconnect loop ──────────────────────────────────────────────
-    // We stay inside this loop until the user deliberately exits (Home button,
-    // SIGTERM) or the PS5 requests a clean disconnect.  On network errors we
-    // wait a few seconds and retry so webOS doesn't need to relaunch the app.
     int attempt = 0;
-    while (!g_should_exit)
+    unsigned int consecutive_failures = 0;
+    unsigned int decoder_open_failures = 0;
+    bool watchdog_recovery_active = false;
+    unsigned int watchdog_recovery_retries = 0;
+    while (!app_exit_requested())
     {
         attempt++;
         app_log_always("[APP] Session attempt %d — connecting to %s\n", attempt, cfg.host);
 
-        // Reset per-session flags before every attempt.
-        g_session_ended = false;
-        g_quit_reason   = CHIAKI_QUIT_REASON_NONE;
-        g_ps5_sleeping  = false;
-        g_have_video_frame = false;
+        atomic_store_explicit(&g_session_ended, false, memory_order_release);
+        atomic_store_explicit(&g_quit_reason, CHIAKI_QUIT_REASON_NONE, memory_order_release);
+        atomic_store_explicit(&g_ps5_sleeping, false, memory_order_release);
 
-        // Reset per-session stats counters
         stats_reset(&g_stream_stats);
+        bool overlay_enabled = stats_overlay.enabled;
+        stats_overlay_init(&stats_overlay);
+        stats_overlay.enabled = overlay_enabled;
         stats_set_video_format(&g_stream_stats, cfg.video_width, cfg.video_height, cfg.video_fps,
                              info.video_profile.codec);
+        atomic_store_explicit(&g_stream_stats.reconnects,
+                              attempt > 0 ? (uint64_t)(attempt - 1) : 0,
+                              memory_order_relaxed);
 
         // Show a minimal loading screen immediately.
         ui_render_loading(g_renderer, "Connecting");
@@ -1447,11 +1687,11 @@ show_launcher:
                         cfg.wakeup_delay_ms);
                 SDL_Event ev;
 
-                while (!g_should_exit && SDL_GetTicks() < deadline)
+                while (!app_exit_requested() && SDL_GetTicks() < deadline)
                 {
                     while (SDL_PollEvent(&ev))
-                        if (ev.type == SDL_QUIT) { g_should_exit = true; break; }
-                    if (g_should_exit) break;
+                        if (ev.type == SDL_QUIT) { app_request_exit(); break; }
+                    if (app_exit_requested()) break;
 
                     ui_render_loading(g_renderer, "Waking console");
                     SDL_RenderPresent(g_renderer);
@@ -1471,7 +1711,7 @@ show_launcher:
                 }
             }
 
-            if (!ps5_ready && !g_should_exit) {
+            if (!ps5_ready && !app_exit_requested()) {
                 app_log_always("[WAKEUP] PS5 did not become reachable; returning to launcher\n");
                 snprintf(launcher_message, sizeof(launcher_message),
                          "PS5 did not wake at %s. Turn it on or check Rest Mode network settings.",
@@ -1481,8 +1721,34 @@ show_launcher:
             }
         }
 
-        if (g_should_exit)
+        if (app_exit_requested())
             break;
+
+        StreamBackend backend;
+        VideoInitResult video_result = VIDEO_INIT_ERROR;
+        if (!stream_backend_open(&backend, &cfg, requested_codec, &video_result))
+        {
+            stream_backend_close(&backend);
+            decoder_open_failures++;
+            if (video_result == VIDEO_INIT_UNSUPPORTED_CODEC ||
+                decoder_open_failures >= 3)
+            {
+                snprintf(launcher_message, sizeof(launcher_message),
+                         video_result == VIDEO_INIT_UNSUPPORTED_CODEC
+                            ? "The media backend rejected the selected video codec."
+                            : "The TV video decoder failed to open three times.");
+                return_to_launcher = true;
+                break;
+            }
+
+            uint32_t delay_ms = stream_retry_delay_ms(consecutive_failures++);
+            app_log_always("[RECOVERY] Decoder open failed (%u/3); retrying in %u ms\n",
+                           decoder_open_failures, delay_ms);
+            if (!wait_for_reconnect(g_renderer, delay_ms))
+                break;
+            continue;
+        }
+        decoder_open_failures = 0;
 
         ChiakiErrorCode err = chiaki_session_init(&g_session, &info, &chiaki_log);
         if (err != CHIAKI_ERR_SUCCESS)
@@ -1491,15 +1757,16 @@ show_launcher:
             snprintf(launcher_message, sizeof(launcher_message),
                      "Could not initialize stream: %s", chiaki_error_string(err));
             return_to_launcher = true;
+            stream_backend_close(&backend);
             break;
         }
 
         chiaki_session_set_event_cb(&g_session, session_event_cb, input_ctx);
         chiaki_session_set_video_sample_cb(&g_session,
-            video_sample_cb, video_ctx);
+            video_sample_cb, backend.video);
         app_log("[APP] Video callback registered\n");
 
-        ChiakiAudioSink audio_sink = audio_make_sink(audio_ctx);
+        ChiakiAudioSink audio_sink = audio_make_sink(backend.audio);
         chiaki_session_set_audio_sink(&g_session, &audio_sink);
         app_log("[APP] Audio sink registered: header_cb=%p frame_cb=%p user=%p\n",
                 (void *)audio_sink.header_cb,
@@ -1515,6 +1782,7 @@ show_launcher:
         {
             app_log("[APP] chiaki_session_start failed: %s\n", chiaki_error_string(err));
             chiaki_session_fini(&g_session);
+            stream_backend_close(&backend);
             snprintf(launcher_message, sizeof(launcher_message),
                      "Could not start stream: %s", chiaki_error_string(err));
             return_to_launcher = true;
@@ -1527,13 +1795,23 @@ show_launcher:
 
         // ── Per-session event loop ────────────────────────────────────────────
         SDL_Event ev;
-
-        // Track when the first video frame arrives so we can show a
-        // brief startup hint ("Press UP for stats overlay").
         uint32_t stream_start_ms = 0;
+        uint64_t stable_stream_started_ms = 0;
+        uint64_t last_latency_query_ms = 0;
+        uint64_t decoder_keyframe_requests_seen = 0;
+        int current_latency_ms = -1;
+        bool current_latency_valid = false;
+        bool watchdog_reconnect = false;
+        const char *watchdog_reason = NULL;
+        StreamHealth health;
+        stream_health_init(&health, stats_monotonic_ms());
 
-        while (!g_session_ended && !g_should_exit)
+        while (!atomic_load_explicit(&g_session_ended, memory_order_acquire) &&
+               !app_exit_requested())
         {
+            bool have_video_frame =
+                atomic_load_explicit(&g_stream_stats.video_frames,
+                                     memory_order_relaxed) > 0;
             while (SDL_PollEvent(&ev))
             {
                 if (ev.type == SDL_QUIT)
@@ -1541,8 +1819,7 @@ show_launcher:
                     // SDL_QUIT arrives when the user presses Home on webOS.
                     // Treat it as a deliberate exit — no reconnect.
                     app_log("[APP] SDL_QUIT received (Home button?) — exiting\n");
-                    g_should_exit   = true;
-                    g_session_ended = true;
+                    app_request_exit();
                     break;
                 }
                 // TV remote Back or Red → disconnect/exit (not forwarded to PS5).
@@ -1550,8 +1827,7 @@ show_launcher:
                     webos_event_is_back_or_red(&ev.key))
                 {
                     app_log("[APP] Remote Back/Red — disconnecting\n");
-                    g_should_exit   = true;
-                    g_session_ended = true;
+                    app_request_exit();
                     break;
                 }
                 // ── Block TV remote navigation keys during streaming ─────────
@@ -1563,7 +1839,7 @@ show_launcher:
                 // Volume, Power, Mute are handled by webOS at the system level
                 // and never arrive as SDL events.  Back and Home are handled
                 // above before this block.
-                if (g_have_video_frame && (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP))
+                if (have_video_frame && (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP))
                 {
                     SDL_Keycode k = ev.key.keysym.sym;
                     bool is_up = (k == SDLK_UP || (int)k == 1073741906);    // WEBOS_KEY_UP
@@ -1597,10 +1873,78 @@ show_launcher:
 
             input_pump(input_ctx);
 
+            const uint64_t health_now_ms = stats_monotonic_ms();
+            have_video_frame =
+                atomic_load_explicit(&g_stream_stats.video_frames,
+                                     memory_order_acquire) > 0;
+            uint64_t last_video_frame_ms =
+                atomic_load_explicit(&g_stream_stats.video_last_frame_ms,
+                                     memory_order_acquire);
+            if (have_video_frame && last_video_frame_ms == 0)
+                last_video_frame_ms = health_now_ms;
+
+            if (have_video_frame && stable_stream_started_ms == 0)
+            {
+                stable_stream_started_ms = health_now_ms;
+                if (watchdog_recovery_active)
+                {
+                    watchdog_recovery_active = false;
+                    watchdog_recovery_retries = 0;
+                    app_log_always("[RECOVERY] Video resumed; watchdog recovery complete\n");
+                }
+            }
+
+            if (health_now_ms - last_latency_query_ms >=
+                STREAM_HEALTH_LATENCY_SAMPLE_MS)
+            {
+                int latency_us = 0;
+                current_latency_valid = SS4S_PlayerGetVideoLatency(
+                    backend.player, 1000000, &latency_us);
+                current_latency_ms = current_latency_valid
+                    ? (latency_us + 500) / 1000 : -1;
+                atomic_store_explicit(&g_stream_stats.video_latency_ms,
+                                      current_latency_ms, memory_order_relaxed);
+                last_latency_query_ms = health_now_ms;
+            }
+
+            uint64_t decoder_keyframe_requests = atomic_load_explicit(
+                &g_stream_stats.video_feed_keyframe_requests,
+                memory_order_relaxed);
+            if (decoder_keyframe_requests > decoder_keyframe_requests_seen)
+            {
+                decoder_keyframe_requests_seen = decoder_keyframe_requests;
+                if (stream_health_allow_idr(&health, health_now_ms))
+                    send_idr_request("decoder requested keyframe");
+            }
+
+            StreamHealthAction health_action = stream_health_update(
+                &health, health_now_ms, have_video_frame, last_video_frame_ms,
+                current_latency_valid, current_latency_ms);
+            if (health_action == STREAM_HEALTH_ACTION_REQUEST_IDR)
+            {
+                send_idr_request(have_video_frame ? "video stalled" : "startup timeout");
+            }
+            else if (health_action != STREAM_HEALTH_ACTION_NONE)
+            {
+                watchdog_reconnect = true;
+                if (!watchdog_recovery_active)
+                    watchdog_recovery_retries = 0;
+                watchdog_recovery_active = true;
+                if (health_action == STREAM_HEALTH_ACTION_RECONNECT_STARTUP)
+                    watchdog_reason = "no accepted video frame for 15 seconds";
+                else if (health_action == STREAM_HEALTH_ACTION_RECONNECT_STALL)
+                    watchdog_reason = "video feed stalled for 5 seconds";
+                else
+                    watchdog_reason = "decoder latency exceeded 750 ms for 5 samples";
+                app_log_always("[RECOVERY] Reconnecting: %s\n", watchdog_reason);
+                atomic_store_explicit(&g_session_ended, true, memory_order_release);
+                break;
+            }
+
             // While we're waiting for the first video sample, show an opaque
             // loading screen. Once video starts, switch back to transparent
             // frames so the NDL plane underneath shows through.
-            if (!g_have_video_frame)
+            if (!have_video_frame)
             {
                 ui_render_loading(g_renderer, "Starting stream");
                 SDL_RenderPresent(g_renderer);
@@ -1621,18 +1965,7 @@ show_launcher:
                 SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 0);
                 SDL_RenderClear(g_renderer);
 
-                // Update + draw stats overlay (if enabled)
-                if (stats_overlay.enabled)
-                {
-                    int lat_us = 0;
-                    if (SS4S_PlayerGetVideoLatency(ss4s_player, 1000000, &lat_us))
-                        atomic_store_explicit(&g_stream_stats.video_latency_ms,
-                                             (lat_us + 500) / 1000,
-                                             memory_order_relaxed);
-                    else
-                        atomic_store_explicit(&g_stream_stats.video_latency_ms, -1, memory_order_relaxed);
-                }
-                stats_overlay_update(&stats_overlay, &g_stream_stats, SDL_GetTicks());
+                stats_overlay_update(&stats_overlay, &g_stream_stats, health_now_ms);
                 if (stats_overlay.enabled)
                     ui_render_stats_overlay(g_renderer, stats_overlay.text);
 
@@ -1658,28 +1991,58 @@ show_launcher:
             }
         }
 
-        // ── Session teardown ──────────────────────────────────────────────────
-        // Only send the sleep command if WE are the one exiting (Home button etc).
-        // If the PS5 itself went to Rest Mode, it already sent the goodbye — skip it.
-        if (cfg.sleep_on_exit && g_should_exit
-            && !g_ps5_sleeping)
+        ChiakiQuitReason session_reason = (ChiakiQuitReason)
+            atomic_load_explicit(&g_quit_reason, memory_order_acquire);
+
+        if (g_signal_exit)
+            app_log_always("[APP] Termination signal received — exiting\n");
+
+        // Only send the sleep command if the user/application is exiting. A
+        // watchdog reconnect must never put the console into Rest Mode.
+        if (cfg.sleep_on_exit && app_exit_requested() &&
+            !atomic_load_explicit(&g_ps5_sleeping, memory_order_acquire))
         {
             app_log("[APP] Sending PS5 to rest mode\n");
             chiaki_session_goto_bed(&g_session);
             SDL_Delay(500);
         }
 
-        app_log_always("[APP] Stopping session (reason=%d)\n", (int)g_quit_reason);
+        app_log_always("[APP] Stopping session (reason=%d watchdog=%s)\n",
+                       (int)session_reason,
+                       watchdog_reason ? watchdog_reason : "none");
         chiaki_session_stop(&g_session);
         chiaki_session_join(&g_session);
-        // No callbacks can race feedback release after the session is joined.
         input_set_session(input_ctx, NULL);
+        if (session_reason == CHIAKI_QUIT_REASON_NONE)
+            session_reason = (ChiakiQuitReason)
+                atomic_load_explicit(&g_quit_reason, memory_order_acquire);
         chiaki_session_fini(&g_session);
+        log_stream_summary(attempt, session_reason);
+        stream_backend_close(&backend);
+
+        if (stable_stream_started_ms > 0 &&
+            stats_monotonic_ms() - stable_stream_started_ms >=
+                STREAM_HEALTH_STABLE_RESET_MS)
+        {
+            consecutive_failures = 0;
+            app_log_always("[RECOVERY] Stable 60-second stream; retry backoff reset\n");
+        }
 
         // ── Reconnect decision ────────────────────────────────────────────────
+        const bool watchdog_session_in_use_retry =
+            session_reason == CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE &&
+            stream_watchdog_can_retry_session_in_use(
+                watchdog_recovery_active, watchdog_recovery_retries);
         const char *request_failure =
-            session_request_failure_message(g_quit_reason);
-        if (!g_should_exit && request_failure)
+            (watchdog_reconnect || watchdog_session_in_use_retry)
+                ? NULL : session_request_failure_message(session_reason);
+        if (watchdog_session_in_use_retry)
+            app_log_always(
+                "[RECOVERY] Console is still releasing the previous Remote Play session "
+                "(retry %u/%u)\n",
+                watchdog_recovery_retries + 1u,
+                STREAM_HEALTH_WATCHDOG_RP_IN_USE_RETRIES);
+        if (!app_exit_requested() && request_failure)
         {
             snprintf(launcher_message, sizeof(launcher_message),
                      "%s", request_failure);
@@ -1687,26 +2050,43 @@ show_launcher:
             app_log_always("[APP] Session request failed — returning to launcher\n");
             break;
         }
-        else if (!g_should_exit && should_reconnect(g_quit_reason))
+        else if (!app_exit_requested() &&
+                 (watchdog_reconnect || watchdog_session_in_use_retry ||
+                  should_reconnect(session_reason)))
         {
-            app_log_always("[APP] Session ended due to network error — retrying in 4s...\n");
-            SDL_Delay(4000);
-            // Continue the outer while loop → new attempt
+            const bool watchdog_retry = watchdog_recovery_active;
+            uint32_t delay_ms = watchdog_retry
+                ? stream_watchdog_retry_delay_ms(watchdog_recovery_retries++)
+                : stream_retry_delay_ms(consecutive_failures);
+            consecutive_failures++;
+            if (watchdog_retry)
+            {
+                app_log_always(
+                    "[RECOVERY] Retrying stream in %u ms "
+                    "(watchdog recovery retry %u, failure streak %u)\n",
+                    delay_ms, watchdog_recovery_retries, consecutive_failures);
+            }
+            else
+            {
+                app_log_always(
+                    "[RECOVERY] Retrying stream in %u ms (failure streak %u)\n",
+                    delay_ms, consecutive_failures);
+            }
+            if (!wait_for_reconnect(g_renderer, delay_ms))
+                break;
         }
         else
         {
-            // Deliberate exit (SIGTERM, Home, PS5 kick) — leave the loop.
+            // Deliberate exit or console shutdown — leave the loop.
             break;
         }
     }
 
-cleanup_session_ctx:
-    audio_fini(audio_ctx);
-    video_fini(video_ctx);
-    SS4S_PlayerClose(ss4s_player);
-    SS4S_Quit();
+cleanup_ss4s:
+    if (ss4s_initialized)
+        SS4S_Quit();
 
-    if (return_to_launcher && !g_should_exit)
+    if (return_to_launcher && !app_exit_requested())
         goto show_launcher;
 
 cleanup_sdl:

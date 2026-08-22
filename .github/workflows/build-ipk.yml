@@ -17,7 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CHIAKI_NG_REF: 83b293983dd950d56c35dd8cb3717841d80838ea
+  CHIAKI_NG_REF: 0c4a45df0cae2af2ba2daef84e881850b07038a3
+  SS4S_REF: dfba721b85420ccabf91dac65be73984bf1865f9
   RELEASE_APP_ID: org.homebrew.chiaki.fork
   DEV_APP_ID: org.homebrew.chiaki.fork.dev
   WEBOS_NDK_VERSION: webos-a38c582
@@ -31,6 +32,8 @@ env:
   SDL2_WEBOS_VERSION: 2.30.12
   SDL2_WEBOS_SONAME: libSDL2-2.0.so.0.3000.12
   SDL2_WEBOS_SHA256: 4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334
+  LIBEVENT_VERSION: 2.1.12-stable
+  LIBEVENT_SHA256: 92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb
 
 jobs:
   build-ipk:
@@ -124,6 +127,14 @@ jobs:
         shell: bash
         run: git -C chiaki-ng submodule update --init --depth 1 third-party/nanopb
 
+      - name: Check out pinned SS4S
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mariotaku/ss4s
+          ref: ${{ env.SS4S_REF }}
+          path: third-party/ss4s
+          persist-credentials: false
+
       - name: Install host build tools
         shell: bash
         run: |
@@ -141,6 +152,7 @@ jobs:
             kmod \
             libtool \
             libssl-dev \
+            libjson-c-dev \
             make \
             ninja-build \
             pkg-config \
@@ -156,6 +168,29 @@ jobs:
             tests/config_import_test.c \
             -o "$RUNNER_TEMP/config-import-test"
           "$RUNNER_TEMP/config-import-test"
+
+      - name: Test stream configuration and recovery policy
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/config_test.c src/config.c \
+            $(pkg-config --cflags --libs json-c) -lm \
+            -o "$RUNNER_TEMP/config-test"
+          "$RUNNER_TEMP/config-test"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/stream_health_test.c src/stream_health.c \
+            -o "$RUNNER_TEMP/stream-health-test"
+          "$RUNNER_TEMP/stream-health-test"
+
+      - name: Test A/V callback contracts
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Werror=incompatible-pointer-types \
+            -Isrc -Ichiaki-ng/lib/include -Ithird-party/ss4s/include \
+            tests/av_callbacks_test.c \
+            src/video.c src/audio.c src/stats.c \
+            -o "$RUNNER_TEMP/av-callbacks-test"
+          "$RUNNER_TEMP/av-callbacks-test"
 
       - name: Test DualSense Bluetooth protocol
         shell: bash

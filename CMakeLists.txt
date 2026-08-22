@@ -10,6 +10,8 @@ option(WEBOS_BUILD "Cross-compile for webOS TV" OFF)
 
 set(WEBOS_STAGING_DIR "/tmp/webos-staging" CACHE PATH "Cross-compiled deps staging dir")
 set(CHIAKI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../chiaki-ng" CACHE PATH "chiaki-ng source directory")
+set(CHIAKI_NG_REVISION "0c4a45df0cae2af2ba2daef84e881850b07038a3" CACHE STRING "Pinned chiaki-ng revision")
+set(SS4S_REVISION "dfba721b85420ccabf91dac65be73984bf1865f9" CACHE STRING "Pinned SS4S revision")
 set(APP_ID "org.homebrew.chiaki.fork" CACHE STRING "webOS application ID")
 set(SDL2_BUNDLED_LIBRARY "" CACHE FILEPATH "SDL-webOS runtime library bundled in the IPK")
 
@@ -17,6 +19,8 @@ if(NOT APP_ID MATCHES "^[a-z0-9][a-z0-9.-]+$")
     message(FATAL_ERROR "Invalid webOS APP_ID: ${APP_ID}")
 endif()
 message(STATUS "webOS application ID: ${APP_ID}")
+message(STATUS "chiaki-ng revision: ${CHIAKI_NG_REVISION}")
+message(STATUS "SS4S revision: ${SS4S_REVISION}")
 
 # ── CMake module path ─────────────────────────────────────────────────────────
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -132,6 +136,7 @@ add_subdirectory("${CHIAKI_SOURCE_DIR}/lib" "${CMAKE_BINARY_DIR}/chiaki_lib" EXC
 fix_pkgconfig_target(PkgConfig::json-c)
 fix_pkgconfig_target(PkgConfig::MINIUPNPC)
 fix_pkgconfig_target(PkgConfig::miniupnpc)
+fix_pkgconfig_target(PkgConfig::LIBEVENT)
 
 # ── Our executable ────────────────────────────────────────────────────────────
 add_executable(chiaki-webos
@@ -145,6 +150,7 @@ add_executable(chiaki-webos
     src/root_feedback.c
     src/ui.c
     src/stats.c
+    src/stream_health.c
 )
 
 add_executable(chiaki-bt-patch
@@ -155,6 +161,14 @@ target_include_directories(chiaki-bt-patch PRIVATE src/)
 
 target_compile_definitions(chiaki-webos PRIVATE
     CHIAKI_APP_ID=\"${APP_ID}\"
+    CHIAKI_NG_REVISION=\"${CHIAKI_NG_REVISION}\"
+    SS4S_REVISION=\"${SS4S_REVISION}\"
+)
+
+target_compile_options(chiaki-webos PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-Wall>
+    $<$<COMPILE_LANGUAGE:C>:-Wextra>
+    $<$<COMPILE_LANGUAGE:C>:-Werror=incompatible-pointer-types>
 )
 
 # Embed rpath so the binary finds ss4s module .so files in lib/ next to itself

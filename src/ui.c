@@ -820,8 +820,6 @@ typedef struct { int w, h; const char *label; } ResOption;
 static const ResOption RES_OPTIONS[] = {
     {1280, 720,  "720p"},
     {1920, 1080, "1080p"},
-    {2560, 1440, "1440p"},
-    {3840, 2160, "2160p"},
 };
 static const int FPS_OPTIONS[]    = {30, 60};
 static const int BITRATE_OPTIONS[] = {5000, 10000, 15000, 25000, 35000, 45000};
@@ -1249,6 +1247,8 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
                        json_object_object_add(root, k, json_object_new_int(v))
 #define SET_BOOL(k, v) json_object_object_del(root, k); \
                        json_object_object_add(root, k, json_object_new_boolean(v))
+#define SET_DBL(k, v)  json_object_object_del(root, k); \
+                       json_object_object_add(root, k, json_object_new_double(v))
 #define SET_STR(k, v)  json_object_object_del(root, k); \
                        json_object_object_add(root, k, json_object_new_string(v))
 
@@ -1260,11 +1260,14 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_BOOL("hw_decode",     cfg->hw_decode);
     SET_BOOL("wakeup",        cfg->wakeup);
     SET_BOOL("sleep_on_exit", cfg->sleep_on_exit);
+    SET_DBL ("packet_loss_max", cfg->packet_loss_max);
+    SET_BOOL("idr_on_fec_failure", cfg->idr_on_fec_failure);
     SET_STR ("video_codec",   (cfg->video_codec && cfg->video_codec[0]) ? cfg->video_codec : "h265");
     SET_STR ("log_level",     ui_log_level_to_string(cfg->log_level));
 
 #undef SET_INT
 #undef SET_BOOL
+#undef SET_DBL
 #undef SET_STR
 
     int rc = json_object_to_file_ext(config_path, root, JSON_C_TO_STRING_PRETTY);

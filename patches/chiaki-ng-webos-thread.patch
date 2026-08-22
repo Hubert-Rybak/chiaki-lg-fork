@@ -1,0 +1,30 @@
+diff --git a/lib/src/thread.c b/lib/src/thread.c
+index 43962ea..3f58a68 100644
+--- a/lib/src/thread.c
++++ b/lib/src/thread.c
+@@ -361,9 +361,25 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_thread_timedjoin(ChiakiThread *thread, void
+ 		return CHIAKI_ERR_TIMEOUT;
+ 	}
+ #else
++#if defined(__WEBOS__)
++	/* webOS glibc predates pthread_clockjoin_np. pthread_timedjoin_np uses
++	 * CLOCK_REALTIME, so do not pass it the monotonic deadline produced by
++	 * set_timeout(). */
++	struct timespec timeout;
++	clock_gettime(CLOCK_REALTIME, &timeout);
++	timeout.tv_sec += timeout_ms / 1000;
++	timeout.tv_nsec += (timeout_ms % 1000) * 1000000;
++	if(timeout.tv_nsec >= 1000000000)
++	{
++		timeout.tv_sec += timeout.tv_nsec / 1000000000;
++		timeout.tv_nsec %= 1000000000;
++	}
++	int r = pthread_timedjoin_np(thread->thread, retval, &timeout);
++#else
+ 	struct timespec timeout;
+ 	set_timeout(&timeout, timeout_ms);
+ 	int r = pthread_clockjoin_np(thread->thread, retval, CLOCK_MONOTONIC, &timeout);
++#endif
+ 	if(r != 0)
+ 	{
+ 		if(r == ETIMEDOUT)

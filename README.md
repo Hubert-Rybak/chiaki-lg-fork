@@ -3,7 +3,7 @@
 A native port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) for LG webOS smart TVs.
 Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
-> **Tested on:** PS5 + webOS 5+. PS4 and webOS 4.x are supported in the code and should work, but have not been directly tested. Please open an issue if you encounter problems on those platforms.
+> **Tested target:** PS5 + webOS 5+. PS4 and webOS 4.x paths are retained but have not been directly validated; a backend that does not expose native Opus is rejected cleanly instead of starting a broken A/V pipeline.
 
 > **AI disclosure:** This project was developed with assistance from [Claude.ai](https://claude.ai), [ChatGPT](https://chat.openai.com), and [Google Gemini](https://gemini.google.com). All generated code was reviewed, tested, and integrated by the project author.
 
@@ -13,6 +13,7 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
 - **PS4 and PS5 Remote Play** over local network
 - **1080p60 streaming** with H.265, H.265 HDR, or H.264 video codecs
+- **Balanced PS5 defaults** — H.265 at 1080p60 and 15 Mbps, with backend-aware codec fallback and bitrate clamping
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
@@ -23,8 +24,8 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
 - **Sleep-on-exit** — sends PS5 to rest mode when you quit the app
-- **Auto-reconnect** — retries on transient network errors; exits cleanly on deliberate disconnects
-- **Stats overlay** — real-time bitrate, FPS, codec, and latency display toggled with the TV remote UP button
+- **Tiered stream recovery** — requests a clean frame on stalls, rebuilds the decoder on persistent failure, gives watchdog reconnects time to release the prior console session, and retries network errors with cancelable backoff
+- **Expanded stats overlay** — bitrate, FPS, codec, decoder latency, frame age, packet loss/FEC, A/V feed outcomes, IDR requests, and reconnect count
 - **webOS version auto-detection** — automatically selects the correct NDL backend (`ndl-webos5` or `ndl-webos4`) at runtime
 - **Two-tier logging** — critical diagnostics always written; verbose chatter gated by `log_level`
 
@@ -33,8 +34,8 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 ## How this fork differs from the original Chiaki-lg build
 
 This fork keeps the original Chiaki-lg hardware-accelerated streaming pipeline,
-but improves controller handling, connection recovery, TV navigation, and
-package management. The comparison below refers to the original
+but improves stream correctness and recovery, controller handling, TV
+navigation, and package management. The comparison below refers to the original
 `org.homebrew.chiaki` version from which this repository was forked.
 
 | Area | Original Chiaki-lg | This fork |
@@ -42,7 +43,15 @@ package management. The comparison below refers to the original
 | PlayStation controls | Direct evdev mapping; button and axis aliases can vary by TV kernel | Bundled SDL GameController mappings with corrected Square/Triangle positions, analog L2/R2, sticks, and hotplug |
 | Controller feedback | Controller input only | Rumble for supported pads, PS5 haptic-to-rumble conversion, and DualSense adaptive triggers, lightbar, and player LEDs |
 | Older webOS DualSense support | No feedback path for TVs without LG's `hid-playstation` driver | Optional rooted compatibility driver and a signature-checked, memory-only correction for LG's Bluetooth output-report bug on supported LG1212/O20 TVs |
-| PS5 connection failures | An initial session failure can terminate the app | Failed initial connections return to the launcher with an error so settings or the address can be corrected |
+| Streaming dependencies | Moving/unversioned dependency inputs | chiaki-ng 1.10.0 and SS4S are pinned to exact revisions; builds verify those inputs and reject modified dependency source trees |
+| Video callback contract | Loss/recovery metadata was treated as codec/keyframe metadata | Uses chiaki-ng's exact `frames_lost` / `frame_recovered` contract and detects real H.264/H.265 keyframes from NAL units |
+| Congestion and FEC recovery | Packet-loss reporting was implicitly clamped to zero; no configured FEC-to-IDR path | Reports up to 5% loss by default, enables IDR on FEC failure, and allows chiaki-ng to downgrade an unsupported profile |
+| Decoder lifecycle | One SS4S player/decoder survives reconnect attempts | Every attempt owns a fresh player, video decoder, and audio decoder; callbacks are joined before teardown |
+| Stream stalls and network failures | Fixed four-second reconnect after a subset of failures | Requests IDR frames for short stalls, reconnects after persistent startup/feed/latency failures, waits 10 seconds for the console to release a watchdog-stopped session, and temporarily retries session-in-use collisions with cancelable capped backoff |
+| A/V backend outcomes | SS4S feed results were handled as a generic success/failure value; audio results were ignored | Classifies video not-ready/keyframe/error and audio not-ready/overflow/error outcomes, suppresses duplicate audio opens, and supplies Opus frame size |
+| Stream diagnostics | Bitrate, FPS, codec, latency, and a combined video error count | Adds two-second loss rate, lost/recovered/FEC totals, last-frame age, per-result A/V counters, IDR requests, reconnects, and a final attempt summary in the log |
+| Resolution choices | UI offered 1440p and 2160p even though libchiaki exposes presets only through 1080p | UI and config validation enforce the supported 1080p ceiling; legacy oversized values safely normalize to 1080p |
+| PS5 connection failures | An initial session failure can terminate the app | Nonrecoverable registration/protocol/capability errors return to the launcher; transient connection failures retry until canceled |
 | Config import | Imports registration credentials; the console IP must be entered separately | Also imports the manual-host address matching the selected registered console when available |
 | Magic Remote | Basic remote handling | D-pad navigation, pointer hover/click, number-pad PIN/IP entry, and Red as Back/disconnect |
 | Installation identity | `org.homebrew.chiaki` | Release ID `org.homebrew.chiaki.fork` and development ID `org.homebrew.chiaki.fork.dev`, allowing all variants to coexist |
@@ -129,6 +138,8 @@ Most settings are managed through the in-app Settings screen. You can also edit 
     "video_fps": 60,
     "video_bitrate": 15000,
     "video_codec": "h265",
+    "packet_loss_max": 0.05,
+    "idr_on_fec_failure": true,
     "audio_volume": 100,
     "wakeup": true,
     "ps5_mac": "AA:BB:CC:DD:EE:FF",
@@ -149,19 +160,30 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `registered_key` | string | `""` | Registration key (base64) — written by import |
 | `rp_key` | string | `""` | Remote Play key (base64) — written by import |
 | `rp_key_type` | int | `0` | RP key type — written by import |
-| `video_width` | int | `1920` | Stream width |
-| `video_height` | int | `1080` | Stream height |
+| `video_width` | int | `1920` | Stream width; values above 1920 normalize to 1080p |
+| `video_height` | int | `1080` | Stream height; values above 1080 normalize to 1080p |
 | `video_fps` | int | `60` | Stream frame rate |
 | `video_bitrate` | int | `15000` | Target bitrate in kbps |
 | `video_codec` | string | `"h265"` | `"h265"`, `"h265_hdr"`, or `"h264"` (PS4 always uses H.264) |
+| `packet_loss_max` | number | `0.05` | Advanced: maximum packet-loss fraction reported to chiaki-ng congestion control, from `0.0` to `1.0`. Lower values react more aggressively; invalid values fall back to `0.05` |
+| `idr_on_fec_failure` | bool | `true` | Advanced: ask chiaki-ng to request an IDR frame when FEC cannot reconstruct a video frame |
 | `audio_volume` | int | `100` | Audio volume (0–100) |
-| `wakeup` | bool | `false` | Send wakeup packets before connecting |
+| `wakeup` | bool | `true` | Send wakeup packets before connecting |
 | `ps5_mac` | string | `""` | PS5 MAC address (used for Wake-on-LAN) |
 | `wakeup_delay_ms` | int | `60000` | Max time (ms) to wait for PS5 to wake |
-| `sleep_on_exit` | bool | `false` | Send PS5 to rest mode on app exit |
-| `ss4s_module` | string | `"auto"` | SS4S backend. `"auto"` detects webOS version at startup and selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x) automatically. Override only if auto-detection fails. |
+| `sleep_on_exit` | bool | `true` | Send PS5 to rest mode on app exit |
+| `ss4s_module` | string | `"auto"` | SS4S backend. `"auto"` detects webOS before connecting and selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x) automatically. Override only if auto-detection fails. |
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
 | `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
+
+The two advanced recovery fields are intentionally JSON-only and are not shown
+as rows in the TV Settings screen. Saving ordinary settings preserves them.
+chiaki-ng exports using `packet_loss_reported_max` (or its legacy
+`packet_loss_max` name) and `idr_on_fec_failure` are imported when present.
+Profile auto-downgrade is always enabled. The recommended balanced values are
+`0.05` and `true`; setting the loss cap to `0` disables useful congestion
+feedback, while a very large cap can make the console tolerate visible loss for
+too long.
 
 ### PSN cloud wakeup (optional)
 
@@ -266,6 +288,15 @@ with a specific wakeup error instead of starting a session that cannot succeed.
 **Black screen with audio**
 Likely a codec or NDL issue. Check logs. Try `"video_codec": "h264"` as a fallback — H.264 has broader compatibility across NDL versions.
 
+**Stutter, rising latency, or repeated reconnects**
+Press **Up** during a stream and watch `Loss (2s)`, `Frame age`, `FEC`, the
+decoder/audio result counters, IDR requests, and reconnects. A rising loss/FEC
+count points to the network; repeated decoder errors with low loss points to the
+TV media backend. The app requests an IDR after a short stall and rebuilds the
+entire SS4S player after a persistent stall or five consecutive one-second
+latency samples above 750 ms. Each completed attempt is summarized in
+`/tmp/chiaki.log` under `[STREAM]`.
+
 **Black screen on webOS 4**
 Check `/tmp/chiaki.log` for the `[AUTO]` line confirming which SS4S module was selected. If auto-detection chose `ndl-webos5` incorrectly, set `"ss4s_module": "ndl-webos4"` in `config.json` manually.
 
@@ -300,11 +331,22 @@ connection error instead of terminating the app.
 
 ### Video pipeline
 
-H.264/H.265 NAL units from the chiaki-ng callback are fed directly to `SS4S_PlayerVideoFeed()`, which routes them to webOS NDL's hardware video decoder. NDL renders on a hardware plane *below* the app's OpenGL surface. The EGL surface is configured with an 8-bit alpha channel and cleared to transparent each frame so the video plane shows through. The SDL/GL layer is only used for UI overlays.
+H.264/H.265 NAL units from the chiaki-ng callback are fed directly to `SS4S_PlayerVideoFeed()`, which routes them to webOS NDL's hardware video decoder. The callback's loss and recovery metadata feeds diagnostics, while actual NAL types provide the SS4S keyframe flag. NDL renders on a hardware plane *below* the app's OpenGL surface. The EGL surface is configured with an 8-bit alpha channel and cleared to transparent each frame so the video plane shows through. The SDL/GL layer is only used for UI overlays.
 
 ### Audio pipeline
 
 Raw Opus packets from the chiaki-ng audio callback are fed directly to `SS4S_PlayerAudioFeed()` with codec `SS4S_AUDIO_OPUS`. webOS NDL has native Opus hardware decoding — there is no software decode step.
+
+### Session lifecycle and recovery
+
+SS4S is initialized once for a launcher connection cycle, but each connection
+attempt creates its own player plus video/audio contexts. Chiaki callbacks are
+stopped and joined before those contexts are closed, preventing a reconnect from
+feeding an already-unloaded NDL pipeline. chiaki-ng handles congestion feedback,
+FEC, and audio jitter buffering. The app adds a watchdog around decoder progress:
+IDR requests are rate-limited to one every two seconds, startup is rebuilt after
+15 seconds without an accepted frame, an active feed is rebuilt after a
+five-second stall, and sustained decoder latency also triggers a rebuild.
 
 ### Input pipeline
 
@@ -317,7 +359,7 @@ process creation off the render loop.
 
 ### webOS version auto-detection
 
-At startup, the app reads `/var/run/nyx/os_info.json` (present on all webOS devices) to determine the major webOS version, then selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x). If that file is unreadable it falls back to probing for `libndl-directmedia2.so` on disk. The result is logged as `[AUTO]` in `/tmp/chiaki.log`.
+Before connecting, the app reads `/var/run/nyx/os_info.json` to determine the major webOS version, then selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x). If that file is unreadable it falls back to probing for `libndl-directmedia2.so` on disk. The result is logged as `[AUTO]` in `/tmp/chiaki.log`.
 
 ---
 
@@ -342,14 +384,20 @@ pip3 install nanopb protobuf --break-system-packages
 
 ```bash
 git clone https://github.com/streetpea/chiaki-ng.git
+git -C chiaki-ng checkout 0c4a45df0cae2af2ba2daef84e881850b07038a3
 git clone <this-repo-url> chiaki-lg
 cd chiaki-lg
 
 export TOOLCHAIN_DIR=~/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
-./build-webos.sh ../chiaki-ng 2>&1 | tee build.log
+bash ./build-webos.sh ../chiaki-ng 2>&1 | tee build.log
 ```
 
-The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), installs the pinned SDL-webOS backport, patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
+The script verifies the exact chiaki-ng revision, checks out the exact SS4S
+revision, cross-compiles all dependencies, installs the pinned SDL-webOS
+backport, applies and then reverses the webOS glibc compatibility patch,
+pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk`
+via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped
+on subsequent runs.
 
 The IPK is output to `build-webos/*.ipk`.
 
@@ -385,19 +433,20 @@ configuration separate from development builds.
 | `main.c` | Entry point, session lifecycle, wakeup (UDP + PSN cloud), webOS version detection, SDL event loop |
 | `config.c` / `config.h` | JSON config loader, default config generation |
 | `config_import.c` / `config_import.h` | chiaki-ng INI settings import |
-| `video.c` / `video.h` | Video callback → SS4S/NDL feed, codec negotiation, stats counters |
+| `video.c` / `video.h` | Video callback → SS4S/NDL feed, NAL classification, stats counters |
 | `audio.c` / `audio.h` | Audio callback → SS4S/NDL Opus feed |
 | `input.c` / `input.h` | SDL gamepad mapping, hotplug, rumble, and PS5 haptics |
 | `dualsense.c` / `dualsense.h` | Rate-limited DualSense Bluetooth HID feedback |
 | `ui.c` / `ui.h` | Launcher UI, settings screen, loading screen, stats overlay renderer |
 | `stats.c` / `stats.h` | Thread-safe stream statistics and overlay state |
+| `stream_health.c` / `stream_health.h` | Deterministic IDR, stall, latency, and reconnect-backoff policy |
 | `app_log.h` | Shared logging macros |
 | `NDL_directmedia.h` | webOS NDL API declarations |
 | `CMakeLists.txt` | Build system |
 | `build-webos.sh` | One-shot cross-compile + IPK packaging script |
 | `appinfo.json` | webOS app metadata |
 | `config.json` | Default config (deployed to TV, populated on first run) |
-| `config_json.example` | Annotated config template |
+| `config.json.example` | Example config template |
 
 ---
 
@@ -405,14 +454,15 @@ configuration separate from development builds.
 
 | Library | Version | Link | Purpose |
 |---|---|---|---|
-| chiaki-ng | main | static | PS Remote Play protocol |
-| SS4S | — | dynamic | webOS NDL video/audio abstraction (ndl-webos4 + ndl-webos5) |
+| chiaki-ng | 1.10.0 (`0c4a45df0cae2af2ba2daef84e881850b07038a3`) | static | PS Remote Play protocol, congestion control, FEC/IDR recovery, audio jitter buffer |
+| SS4S | `dfba721b85420ccabf91dac65be73984bf1865f9` | dynamic | webOS NDL video/audio abstraction (ndl-webos4 + ndl-webos5) |
 | OpenSSL | 3.2.1 | static | TLS for PSN API, crypto for chiaki |
 | Opus | 1.4 | static | Audio codec (chiaki internal use) |
 | FFmpeg | 6.1.1 | static | H.264/H.265 codec support |
 | json-c | 0.17 | static | Config file parsing |
 | cURL | 8.7.1 | static | PSN API HTTP calls |
 | miniupnpc | 2.2.7 | static | UPnP (chiaki dependency) |
+| libevent | 2.1.12-stable | static | Event loop for chiaki-ng remote hole punching |
 | GF-Complete | master | static | Erasure coding (chiaki dependency) |
 | Jerasure | 2.0 | static | FEC (chiaki dependency) |
 | SDL-webOS | 2.30.12 | bundled dynamic | Window/GL surface, controller mapping/rumble, TV remote input |

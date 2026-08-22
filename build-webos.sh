@@ -10,10 +10,14 @@ BUILD_DIR="$SCRIPT_DIR/build-webos"
 OUR_STAGING="/tmp/webos-staging"
 WEBOS_BUILD_TYPE="${WEBOS_BUILD_TYPE:-Release}"
 CHIAKI_APP_ID="${CHIAKI_APP_ID:-org.homebrew.chiaki.fork}"
+CHIAKI_NG_REF="${CHIAKI_NG_REF:-0c4a45df0cae2af2ba2daef84e881850b07038a3}"
+SS4S_REF="${SS4S_REF:-dfba721b85420ccabf91dac65be73984bf1865f9}"
 SDL2_WEBOS_RELEASE="${SDL2_WEBOS_RELEASE:-release-2.30.12-webos.5}"
 SDL2_WEBOS_VERSION="${SDL2_WEBOS_VERSION:-2.30.12}"
 SDL2_WEBOS_SONAME="${SDL2_WEBOS_SONAME:-libSDL2-2.0.so.0.3000.12}"
 SDL2_WEBOS_SHA256="${SDL2_WEBOS_SHA256:-4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334}"
+LIBEVENT_VERSION="${LIBEVENT_VERSION:-2.1.12-stable}"
+LIBEVENT_SHA256="${LIBEVENT_SHA256:-92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb}"
 
 case "$WEBOS_BUILD_TYPE" in
     Debug|Release|RelWithDebInfo|MinSizeRel) ;;
@@ -26,6 +30,22 @@ esac
 
 if [[ ! "$CHIAKI_APP_ID" =~ ^[a-z0-9][a-z0-9.-]+$ ]]; then
     echo "ERROR: Invalid CHIAKI_APP_ID '$CHIAKI_APP_ID'."
+    exit 1
+fi
+
+if ! git -C "$CHIAKI_NG_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ERROR: '$CHIAKI_NG_DIR' is not a chiaki-ng Git checkout."
+    exit 1
+fi
+CHIAKI_NG_ACTUAL="$(git -C "$CHIAKI_NG_DIR" rev-parse HEAD)"
+if [[ "$CHIAKI_NG_ACTUAL" != "$CHIAKI_NG_REF" ]]; then
+    echo "ERROR: chiaki-ng is at $CHIAKI_NG_ACTUAL; expected $CHIAKI_NG_REF (v1.10.0)."
+    echo "  Check out the pinned revision or override CHIAKI_NG_REF intentionally."
+    exit 1
+fi
+if ! git -C "$CHIAKI_NG_DIR" diff --quiet ||
+   ! git -C "$CHIAKI_NG_DIR" diff --cached --quiet; then
+    echo "ERROR: chiaki-ng has tracked local changes; refusing a non-reproducible build."
     exit 1
 fi
 
@@ -262,6 +282,58 @@ build_miniupnpc() {
     cmake --install "$bdir"
 }
 
+# ── libevent ──────────────────────────────────────────────────────────────────
+# chiaki-ng's remote hole-punching code is part of libchiaki and requires the
+# target libevent headers even when the application only starts local sessions.
+build_libevent() {
+    local ver="$LIBEVENT_VERSION"
+    local hash_prefix="${LIBEVENT_SHA256:0:12}"
+    local archive="/tmp/libevent-$ver.tar.gz"
+    local src="/tmp/libevent-$ver-$hash_prefix"
+    local marker="$OUR_STAGING/.libevent-$ver-$hash_prefix"
+    local url="https://github.com/libevent/libevent/releases/download/release-$ver/libevent-$ver.tar.gz"
+
+    if [[ -f "$marker" &&
+          -f "$OUR_STAGING/include/event2/event.h" &&
+          -f "$OUR_STAGING/lib/libevent.a" &&
+          -f "$OUR_STAGING/lib/pkgconfig/libevent.pc" ]]; then
+        echo "-- libevent $ver: skip"
+        return
+    fi
+
+    echo "-- Building libevent $ver"
+    if [[ ! -f "$archive" ]] ||
+       ! echo "$LIBEVENT_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
+        rm -f "$archive"
+        curl --fail --location --retry 5 --output "$archive" "$url"
+    fi
+    echo "$LIBEVENT_SHA256  $archive" | sha256sum --check --strict
+
+    if [[ ! -f "$src/CMakeLists.txt" ]]; then
+        mkdir -p "$src"
+        tar xzf "$archive" -C "$src" --strip-components=1
+    fi
+
+    local bdir="$src/build-webos"
+    cmake -B "$bdir" -S "$src" \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+        -DCMAKE_INSTALL_PREFIX="$OUR_STAGING" \
+        -DEVENT__LIBRARY_TYPE=STATIC \
+        -DEVENT__DISABLE_OPENSSL=ON \
+        -DEVENT__DISABLE_BENCHMARK=ON \
+        -DEVENT__DISABLE_TESTS=ON \
+        -DEVENT__DISABLE_REGRESS=ON \
+        -DEVENT__DISABLE_SAMPLES=ON \
+        -DEVENT__DOXYGEN=OFF
+    cmake --build "$bdir" -j"$NJOBS"
+    cmake --install "$bdir"
+
+    test -f "$OUR_STAGING/include/event2/event.h"
+    test -f "$OUR_STAGING/lib/libevent.a"
+    test -f "$OUR_STAGING/lib/pkgconfig/libevent.pc"
+    touch "$marker"
+}
+
 # ── cURL ──────────────────────────────────────────────────────────────────────
 build_curl() {
     local ver="8.7.1"
@@ -405,19 +477,33 @@ build_openssl
 build_opus
 build_jsonc
 build_miniupnpc
+build_libevent
 build_curl
 build_gf_complete
 build_jerasure
 
-# ── Clone ss4s ────────────────────────────────────────────────────────────────
+# ── Pin ss4s ──────────────────────────────────────────────────────────────────
 SS4S_DIR="$SCRIPT_DIR/third-party/ss4s"
-if [[ ! -f "$SS4S_DIR/CMakeLists.txt" ]]; then
-    echo "-- Cloning ss4s..."
+if [[ ! -d "$SS4S_DIR/.git" ]]; then
+    if [[ -e "$SS4S_DIR" ]]; then
+        echo "ERROR: $SS4S_DIR exists but is not a Git checkout; cannot verify SS4S."
+        exit 1
+    fi
+    echo "-- Cloning pinned ss4s..."
     mkdir -p "$SCRIPT_DIR/third-party"
-    git clone --depth=1 https://github.com/mariotaku/ss4s.git "$SS4S_DIR"
-else
-    echo "-- ss4s: already present ($(git -C "$SS4S_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown'))"
+    git clone --filter=blob:none https://github.com/mariotaku/ss4s.git "$SS4S_DIR"
 fi
+if [[ -n "$(git -C "$SS4S_DIR" status --porcelain)" ]]; then
+    echo "ERROR: SS4S has local changes; refusing to replace or build them."
+    exit 1
+fi
+if ! git -C "$SS4S_DIR" cat-file -e "$SS4S_REF^{commit}" 2>/dev/null; then
+    git -C "$SS4S_DIR" fetch --depth=1 origin "$SS4S_REF"
+fi
+if [[ "$(git -C "$SS4S_DIR" rev-parse HEAD)" != "$SS4S_REF" ]]; then
+    git -C "$SS4S_DIR" checkout --detach "$SS4S_REF"
+fi
+echo "-- ss4s: pinned at $(git -C "$SS4S_DIR" rev-parse HEAD)"
 
 # ── Patch all staging .pc files ───────────────────────────────────────────────
 # cmake's FindPkgConfig, when a toolchain sets CMAKE_SYSROOT, prepends the
@@ -521,25 +607,22 @@ fi
 echo ""
 echo "=== Patching chiaki-ng sources for webOS ==="
 
-# pthread_clockjoin_np was added in glibc 2.30.
-# webOS uses an older glibc that only has pthread_timedjoin_np (uses CLOCK_REALTIME).
-# The difference: clockjoin lets you pick the clock; timedjoin always uses CLOCK_REALTIME.
-# For our purposes (waiting on a thread with a timeout) this is functionally identical.
-THREAD_C="$CHIAKI_NG_DIR/lib/src/thread.c"
-if grep -q 'pthread_clockjoin_np' "$THREAD_C" 2>/dev/null; then
-    # Replace:  pthread_clockjoin_np(thread->thread, retval, CLOCK_MONOTONIC, &timeout)
-    # With:     pthread_timedjoin_np(thread->thread, retval, &timeout)
-    sed -i 's/pthread_clockjoin_np(\(.*\), CLOCK_MONOTONIC, \(&timeout\))/pthread_timedjoin_np(\1, \2)/' \
-        "$THREAD_C"
-    if grep -q 'pthread_clockjoin_np' "$THREAD_C"; then
-        echo "-- WARNING: pthread_clockjoin_np patch may have failed, checking manually..."
-        grep -n 'pthread_clockjoin_np\|pthread_timedjoin_np' "$THREAD_C" | sed 's/^/  /'
-    else
-        echo "-- thread.c: patched pthread_clockjoin_np → pthread_timedjoin_np"
+# pthread_clockjoin_np was added after webOS's glibc. Apply an exact patch that
+# uses pthread_timedjoin_np with a CLOCK_REALTIME deadline, then always reverse
+# it on exit so the external chiaki-ng checkout remains clean.
+CHIAKI_THREAD_PATCH="$SCRIPT_DIR/patches/chiaki-ng-webos-thread.patch"
+CHIAKI_THREAD_PATCHED=0
+restore_chiaki_patch() {
+    if [[ "$CHIAKI_THREAD_PATCHED" == 1 ]]; then
+        git -C "$CHIAKI_NG_DIR" apply --reverse "$CHIAKI_THREAD_PATCH" ||
+            echo "WARNING: could not reverse $CHIAKI_THREAD_PATCH" >&2
     fi
-else
-    echo "-- thread.c: no pthread_clockjoin_np (already patched or different version)"
-fi
+}
+trap restore_chiaki_patch EXIT
+git -C "$CHIAKI_NG_DIR" apply --check "$CHIAKI_THREAD_PATCH"
+git -C "$CHIAKI_NG_DIR" apply "$CHIAKI_THREAD_PATCH"
+CHIAKI_THREAD_PATCHED=1
+echo "-- thread.c: applied reversible webOS timed-join compatibility patch"
 
 # ── Generate cmake toolchain extension ────────────────────────────────────────
 # We use CMAKE_PROJECT_INCLUDE to inject fixes early in configuration:
@@ -646,6 +729,8 @@ cmake -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_BUILD_TYPE="$WEBOS_BUILD_TYPE" \
     -DAPP_ID="$CHIAKI_APP_ID" \
+    -DCHIAKI_NG_REVISION="$CHIAKI_NG_REF" \
+    -DSS4S_REVISION="$SS4S_REF" \
     -DWEBOS_BUILD=ON \
     -DWEBOS_STAGING_DIR="$OUR_STAGING" \
     -DCHIAKI_SOURCE_DIR="$CHIAKI_NG_DIR" \

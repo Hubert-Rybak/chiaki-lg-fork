@@ -136,6 +136,10 @@ typedef struct {
     char psn_refresh_token[2048]; /* OAuth2 refresh token (may be quoted) */
     char codec[32];           /* "h265" / "h264" */
     int  bitrate;             /* kbps */
+    double packet_loss_max;
+    bool packet_loss_max_set;
+    bool idr_on_fec_failure;
+    bool idr_on_fec_failure_set;
     bool sleep_on_exit;
 } IniData;
 
@@ -212,6 +216,24 @@ static void process_line(IniData *d, const char *section,
             snprintf(d->codec, sizeof(d->codec), "%s", val);
         else if (!strcmp(key, "bitrate_local_ps5") || !strcmp(key, "bitrate_local_ps4"))
             d->bitrate = atoi(val);
+        else if (!strcmp(key, "packet_loss_reported_max") ||
+                 !strcmp(key, "packet_loss_max")) {
+            char *end = NULL;
+            double parsed = strtod(val, &end);
+            if (end != val && *str_trim(end) == '\0') {
+                d->packet_loss_max = parsed;
+                d->packet_loss_max_set = true;
+            }
+        }
+        else if (!strcmp(key, "idr_on_fec_failure")) {
+            if (!strcmp(val, "true") || !strcmp(val, "1")) {
+                d->idr_on_fec_failure = true;
+                d->idr_on_fec_failure_set = true;
+            } else if (!strcmp(val, "false") || !strcmp(val, "0")) {
+                d->idr_on_fec_failure = false;
+                d->idr_on_fec_failure_set = true;
+            }
+        }
         else if (!strcmp(key, "disconnect_action"))
             d->sleep_on_exit = (strstr(val, "sleep") != NULL);
     }
@@ -225,11 +247,15 @@ static void process_line(IniData *d, const char *section,
 static void extract_existing_host(const char *config_path,
                                    char *host_out, size_t host_len,
                                    int *width, int *height, int *fps,
-                                   char *refresh_out, size_t refresh_len)
+                                   char *refresh_out, size_t refresh_len,
+                                   double *packet_loss_max,
+                                   bool *idr_on_fec_failure)
 {
     *host_out = '\0';
     if (refresh_out && refresh_len) *refresh_out = '\0';
     *width = 1920; *height = 1080; *fps = 60;
+    if (packet_loss_max) *packet_loss_max = 0.05;
+    if (idr_on_fec_failure) *idr_on_fec_failure = true;
 
     FILE *f = fopen(config_path, "r");
     if (!f) return;
@@ -275,6 +301,30 @@ static void extract_existing_host(const char *config_path,
     if (hp) { int v = atoi(strchr(hp, ':') + 1); if (v > 0) *height = v; }
     const char *fp2 = strstr(buf, "\"video_fps\"");
     if (fp2) { int v = atoi(strchr(fp2, ':') + 1); if (v > 0) *fps = v; }
+
+    const char *lp = strstr(buf, "\"packet_loss_max\"");
+    if (lp && packet_loss_max) {
+        const char *colon = strchr(lp, ':');
+        if (colon) {
+            char *end = NULL;
+            double value = strtod(colon + 1, &end);
+            if (end != colon + 1 && value >= 0.0 && value <= 1.0)
+                *packet_loss_max = value;
+        }
+    }
+
+    const char *ip = strstr(buf, "\"idr_on_fec_failure\"");
+    if (ip && idr_on_fec_failure) {
+        const char *colon = strchr(ip, ':');
+        if (colon) {
+            colon++;
+            while (*colon == ' ' || *colon == '\t') colon++;
+            if (!strncmp(colon, "true", 4))
+                *idr_on_fec_failure = true;
+            else if (!strncmp(colon, "false", 5))
+                *idr_on_fec_failure = false;
+        }
+    }
 }
 
 /* ── JSON string escape ──────────────────────────────────────────────────────
@@ -442,8 +492,21 @@ ChiakiImportResult config_try_import_chiaki_ini(
     char host[256];
     int  vid_w, vid_h, vid_fps;
     char existing_refresh[2048] = "";
+    double packet_loss_max = 0.05;
+    bool idr_on_fec_failure = true;
     extract_existing_host(config_path, host, sizeof(host), &vid_w, &vid_h, &vid_fps,
-                          existing_refresh, sizeof(existing_refresh));
+                          existing_refresh, sizeof(existing_refresh),
+                          &packet_loss_max, &idr_on_fec_failure);
+
+    if (d.packet_loss_max_set) {
+        if (d.packet_loss_max >= 0.0 && d.packet_loss_max <= 1.0)
+            packet_loss_max = d.packet_loss_max;
+        else
+            app_log_always("[IMPORT] Ignoring out-of-range packet loss cap %.3f\n",
+                           d.packet_loss_max);
+    }
+    if (d.idr_on_fec_failure_set)
+        idr_on_fec_failure = d.idr_on_fec_failure;
 
     if (imported_host[0]) {
         if (host[0] && strcmp(host, imported_host) != 0)
@@ -490,6 +553,8 @@ ChiakiImportResult config_try_import_chiaki_ini(
         "    \"video_fps\": %d,\n"
         "    \"video_bitrate\": %d,\n"
         "    \"video_codec\": \"%s\",\n"
+        "    \"packet_loss_max\": %.2f,\n"
+        "    \"idr_on_fec_failure\": %s,\n"
         "    \"audio_volume\": 100,\n"
         "    \"wakeup\": %s,\n"
         "    \"ps5_mac\": \"%s\",\n"
@@ -497,7 +562,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         "    \"sleep_on_exit\": %s,\n"
         "    \"log_level\": \"warning\",\n"
         "    \"psn_refresh_token\": \"%s\",\n"
-        "    \"ss4s_module\": \"ndl-webos5\"\n"
+        "    \"ss4s_module\": \"auto\"\n"
         "}\n",
         esc_host,
         ps5 ? "true" : "false",
@@ -508,6 +573,8 @@ ChiakiImportResult config_try_import_chiaki_ini(
         vid_w, vid_h, vid_fps,
         bitrate,
         codec,
+        packet_loss_max,
+        idr_on_fec_failure ? "true" : "false",
         ps5_mac[0] ? "true" : "false",
         esc_mac,
         d.sleep_on_exit ? "true" : "false",
@@ -516,9 +583,11 @@ ChiakiImportResult config_try_import_chiaki_ini(
     fclose(out);
 
     app_log_always("[IMPORT] config.json written: host_set=%d ps5=%d rp_key_type=%d "
-                   "codec=%s bitrate=%d sleep_on_exit=%d mac_set=%d\n",
+                   "codec=%s bitrate=%d loss_cap=%.2f idr_on_fec=%d "
+                   "sleep_on_exit=%d mac_set=%d\n",
                    host[0] != '\0', ps5,
-                   d.rp_key_type, codec, bitrate, d.sleep_on_exit,
+                   d.rp_key_type, codec, bitrate, packet_loss_max,
+                   idr_on_fec_failure, d.sleep_on_exit,
                    ps5_mac[0] != '\0');
 
     /* ── Rename INI so we don't re-import on next auto-launch ────────────── */
