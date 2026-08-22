@@ -80,3 +80,18 @@ uint32_t stream_retry_delay_ms(unsigned int consecutive_failures)
         (unsigned int)(sizeof(delays_ms) / sizeof(delays_ms[0])) - 1u;
     return delays_ms[consecutive_failures < last ? consecutive_failures : last];
 }
+
+uint32_t stream_watchdog_retry_delay_ms(unsigned int watchdog_retries)
+{
+    return watchdog_retries == 0
+        ? STREAM_HEALTH_WATCHDOG_GRACE_MS
+        : STREAM_HEALTH_WATCHDOG_RETRY_MS;
+}
+
+bool stream_watchdog_can_retry_session_in_use(
+    bool watchdog_recovery_active,
+    unsigned int watchdog_retries)
+{
+    return watchdog_recovery_active &&
+        watchdog_retries < STREAM_HEALTH_WATCHDOG_RP_IN_USE_RETRIES;
+}

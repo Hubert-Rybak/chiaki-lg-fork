@@ -24,7 +24,7 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
 - **Sleep-on-exit** — sends PS5 to rest mode when you quit the app
-- **Tiered stream recovery** — requests a clean frame on stalls, rebuilds the decoder on persistent failure, and retries network errors with cancelable 2/4/8/15-second backoff
+- **Tiered stream recovery** — requests a clean frame on stalls, rebuilds the decoder on persistent failure, gives watchdog reconnects time to release the prior console session, and retries network errors with cancelable backoff
 - **Expanded stats overlay** — bitrate, FPS, codec, decoder latency, frame age, packet loss/FEC, A/V feed outcomes, IDR requests, and reconnect count
 - **webOS version auto-detection** — automatically selects the correct NDL backend (`ndl-webos5` or `ndl-webos4`) at runtime
 - **Two-tier logging** — critical diagnostics always written; verbose chatter gated by `log_level`
@@ -47,7 +47,7 @@ navigation, and package management. The comparison below refers to the original
 | Video callback contract | Loss/recovery metadata was treated as codec/keyframe metadata | Uses chiaki-ng's exact `frames_lost` / `frame_recovered` contract and detects real H.264/H.265 keyframes from NAL units |
 | Congestion and FEC recovery | Packet-loss reporting was implicitly clamped to zero; no configured FEC-to-IDR path | Reports up to 5% loss by default, enables IDR on FEC failure, and allows chiaki-ng to downgrade an unsupported profile |
 | Decoder lifecycle | One SS4S player/decoder survives reconnect attempts | Every attempt owns a fresh player, video decoder, and audio decoder; callbacks are joined before teardown |
-| Stream stalls and network failures | Fixed four-second reconnect after a subset of failures | Requests IDR frames for short stalls, reconnects after persistent startup/feed/latency failures, and uses responsive capped backoff that Back/Red can cancel |
+| Stream stalls and network failures | Fixed four-second reconnect after a subset of failures | Requests IDR frames for short stalls, reconnects after persistent startup/feed/latency failures, waits 10 seconds for the console to release a watchdog-stopped session, and temporarily retries session-in-use collisions with cancelable capped backoff |
 | A/V backend outcomes | SS4S feed results were handled as a generic success/failure value; audio results were ignored | Classifies video not-ready/keyframe/error and audio not-ready/overflow/error outcomes, suppresses duplicate audio opens, and supplies Opus frame size |
 | Stream diagnostics | Bitrate, FPS, codec, latency, and a combined video error count | Adds two-second loss rate, lost/recovered/FEC totals, last-frame age, per-result A/V counters, IDR requests, reconnects, and a final attempt summary in the log |
 | Resolution choices | UI offered 1440p and 2160p even though libchiaki exposes presets only through 1080p | UI and config validation enforce the supported 1080p ceiling; legacy oversized values safely normalize to 1080p |

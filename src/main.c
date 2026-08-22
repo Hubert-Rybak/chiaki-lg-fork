@@ -1640,6 +1640,8 @@ show_launcher:
     int attempt = 0;
     unsigned int consecutive_failures = 0;
     unsigned int decoder_open_failures = 0;
+    bool watchdog_recovery_active = false;
+    unsigned int watchdog_recovery_retries = 0;
     while (!app_exit_requested())
     {
         attempt++;
@@ -1882,7 +1884,15 @@ show_launcher:
                 last_video_frame_ms = health_now_ms;
 
             if (have_video_frame && stable_stream_started_ms == 0)
+            {
                 stable_stream_started_ms = health_now_ms;
+                if (watchdog_recovery_active)
+                {
+                    watchdog_recovery_active = false;
+                    watchdog_recovery_retries = 0;
+                    app_log_always("[RECOVERY] Video resumed; watchdog recovery complete\n");
+                }
+            }
 
             if (health_now_ms - last_latency_query_ms >=
                 STREAM_HEALTH_LATENCY_SAMPLE_MS)
@@ -1917,6 +1927,9 @@ show_launcher:
             else if (health_action != STREAM_HEALTH_ACTION_NONE)
             {
                 watchdog_reconnect = true;
+                if (!watchdog_recovery_active)
+                    watchdog_recovery_retries = 0;
+                watchdog_recovery_active = true;
                 if (health_action == STREAM_HEALTH_ACTION_RECONNECT_STARTUP)
                     watchdog_reason = "no accepted video frame for 15 seconds";
                 else if (health_action == STREAM_HEALTH_ACTION_RECONNECT_STALL)
@@ -2016,8 +2029,19 @@ show_launcher:
         }
 
         // ── Reconnect decision ────────────────────────────────────────────────
-        const char *request_failure = watchdog_reconnect
-            ? NULL : session_request_failure_message(session_reason);
+        const bool watchdog_session_in_use_retry =
+            session_reason == CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE &&
+            stream_watchdog_can_retry_session_in_use(
+                watchdog_recovery_active, watchdog_recovery_retries);
+        const char *request_failure =
+            (watchdog_reconnect || watchdog_session_in_use_retry)
+                ? NULL : session_request_failure_message(session_reason);
+        if (watchdog_session_in_use_retry)
+            app_log_always(
+                "[RECOVERY] Console is still releasing the previous Remote Play session "
+                "(retry %u/%u)\n",
+                watchdog_recovery_retries + 1u,
+                STREAM_HEALTH_WATCHDOG_RP_IN_USE_RETRIES);
         if (!app_exit_requested() && request_failure)
         {
             snprintf(launcher_message, sizeof(launcher_message),
@@ -2027,11 +2051,27 @@ show_launcher:
             break;
         }
         else if (!app_exit_requested() &&
-                 (watchdog_reconnect || should_reconnect(session_reason)))
+                 (watchdog_reconnect || watchdog_session_in_use_retry ||
+                  should_reconnect(session_reason)))
         {
-            uint32_t delay_ms = stream_retry_delay_ms(consecutive_failures++);
-            app_log_always("[RECOVERY] Retrying stream in %u ms (failure streak %u)\n",
-                           delay_ms, consecutive_failures);
+            const bool watchdog_retry = watchdog_recovery_active;
+            uint32_t delay_ms = watchdog_retry
+                ? stream_watchdog_retry_delay_ms(watchdog_recovery_retries++)
+                : stream_retry_delay_ms(consecutive_failures);
+            consecutive_failures++;
+            if (watchdog_retry)
+            {
+                app_log_always(
+                    "[RECOVERY] Retrying stream in %u ms "
+                    "(watchdog recovery retry %u, failure streak %u)\n",
+                    delay_ms, watchdog_recovery_retries, consecutive_failures);
+            }
+            else
+            {
+                app_log_always(
+                    "[RECOVERY] Retrying stream in %u ms (failure streak %u)\n",
+                    delay_ms, consecutive_failures);
+            }
             if (!wait_for_reconnect(g_renderer, delay_ms))
                 break;
         }

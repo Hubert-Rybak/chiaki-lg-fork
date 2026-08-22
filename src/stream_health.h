@@ -12,6 +12,9 @@
 #define STREAM_HEALTH_HIGH_LATENCY_MS            750
 #define STREAM_HEALTH_HIGH_LATENCY_SAMPLES          5u
 #define STREAM_HEALTH_STABLE_RESET_MS          60000u
+#define STREAM_HEALTH_WATCHDOG_GRACE_MS         10000u
+#define STREAM_HEALTH_WATCHDOG_RETRY_MS         15000u
+#define STREAM_HEALTH_WATCHDOG_RP_IN_USE_RETRIES    3u
 
 typedef enum StreamHealthAction
 {
@@ -50,3 +53,11 @@ StreamHealthAction stream_health_update(
 
 /* 2s, 4s, 8s, then a 15s cap. consecutive_failures is zero-based. */
 uint32_t stream_retry_delay_ms(unsigned int consecutive_failures);
+
+/* Give the console extra time to release a watchdog-stopped Remote Play session. */
+uint32_t stream_watchdog_retry_delay_ms(unsigned int watchdog_retries);
+
+/* A short RP-in-use response is transient only during a bounded watchdog recovery. */
+bool stream_watchdog_can_retry_session_in_use(
+    bool watchdog_recovery_active,
+    unsigned int watchdog_retries);

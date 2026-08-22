@@ -23,6 +23,27 @@ static void expect_delay(unsigned int failure, uint32_t expected)
     exit(1);
 }
 
+static void expect_watchdog_delay(unsigned int retry, uint32_t expected)
+{
+    uint32_t actual = stream_watchdog_retry_delay_ms(retry);
+    if (actual == expected)
+        return;
+    fprintf(stderr, "stream_health_test: watchdog retry %u was %u ms, expected %u ms\n",
+            retry, actual, expected);
+    exit(1);
+}
+
+static void expect_in_use_retry(bool active, unsigned int retry, bool expected)
+{
+    bool actual = stream_watchdog_can_retry_session_in_use(active, retry);
+    if (actual == expected)
+        return;
+    fprintf(stderr,
+            "stream_health_test: watchdog in-use retry active=%d retry=%u was %d, expected %d\n",
+            active, retry, actual, expected);
+    exit(1);
+}
+
 int main(void)
 {
     StreamHealth health;
@@ -76,6 +97,14 @@ int main(void)
     expect_delay(2, 8000);
     expect_delay(3, 15000);
     expect_delay(20, 15000);
+
+    expect_watchdog_delay(0, 10000);
+    expect_watchdog_delay(1, 15000);
+    expect_watchdog_delay(20, 15000);
+    expect_in_use_retry(false, 0, false);
+    expect_in_use_retry(true, 0, true);
+    expect_in_use_retry(true, 2, true);
+    expect_in_use_retry(true, 3, false);
 
     puts("stream_health_test: passed");
     return 0;
