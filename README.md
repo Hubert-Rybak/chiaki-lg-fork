@@ -227,10 +227,10 @@ SDL's HIDAPI backend and routed through their kernel `/dev/input/event*` node.
 The TV app jail can enumerate `/dev/hidraw*` but does not reliably deliver
 Bluetooth input reports there. The active DualSense event handler is read from
 `/proc/bus/input/devices` and passed explicitly to SDL before initialization,
-which also covers event indices above 31. Pair the pad before launching the
-app; if it connects later, restart the app. The exception is limited to these
-two Bluetooth device IDs; USB DualSense and all other controller backends
-remain unchanged.
+which also covers event indices above 31. SDL's PS5 HIDAPI driver yields to
+evdev only when that active event handler is present. Pair the pad before
+launching the app; if it connects later, restart the app. Global HIDAPI and
+all non-PlayStation controller backends remain unchanged.
 
 Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
 haptic audio stream is translated to the controller motors. A Bluetooth

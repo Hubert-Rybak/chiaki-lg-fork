@@ -18,6 +18,10 @@ device_hint_position = source.find("SDL_HINT_JOYSTICK_DEVICE")
 if device_hint_position < 0 or device_hint_position > init_position:
     raise SystemExit("Explicit DualSense evdev path must be configured before SDL_Init")
 
+ps5_hint_position = source.find("SDL_HINT_JOYSTICK_HIDAPI_PS5")
+if ps5_hint_position < 0 or ps5_hint_position > init_position:
+    raise SystemExit("PS5 HIDAPI driver must yield to evdev before SDL_Init")
+
 hint_call = source[hint_position:init_position]
 for device_id in ("0x054c/0x0ce6", "0x054c/0x0df2"):
     if device_id not in hint_call:

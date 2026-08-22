@@ -1300,6 +1300,8 @@ int main(int argc, char *argv[])
         dualsense_event_path, sizeof(dualsense_event_path));
     const SDL_bool dualsense_device_hint = !dualsense_event_found ||
         SDL_SetHint(SDL_HINT_JOYSTICK_DEVICE, dualsense_event_path);
+    const SDL_bool dualsense_ps5_hidapi_hint = !dualsense_event_found ||
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "0");
     const SDL_bool dualsense_evdev_hint = SDL_SetHint(
         "SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
         "0x054c/0x0ce6,0x054c/0x0df2");
@@ -1310,7 +1312,8 @@ int main(int argc, char *argv[])
     }
     app_log_always(
         "[INPUT] Bluetooth DualSense routing: %s; device path: %s\n",
-        dualsense_evdev_hint && dualsense_device_hint
+        dualsense_evdev_hint && dualsense_device_hint &&
+                dualsense_ps5_hidapi_hint
             ? "evdev" : "SDL hint rejected",
         dualsense_event_found ? dualsense_event_path
                               : "not connected at startup");
