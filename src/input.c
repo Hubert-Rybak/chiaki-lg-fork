@@ -103,6 +103,38 @@ static bool controller_is_dualsense(SDL_GameController *controller)
     return false;
 }
 
+static bool log_controller_candidate(int device_index)
+{
+    const char *name = SDL_JoystickNameForIndex(device_index);
+    const char *path = SDL_JoystickPathForIndex(device_index);
+    SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(device_index);
+    char guid_string[33] = {0};
+    SDL_JoystickGetGUIDString(guid, guid_string, sizeof(guid_string));
+    Uint16 vendor = SDL_JoystickGetDeviceVendor(device_index);
+    Uint16 product = SDL_JoystickGetDeviceProduct(device_index);
+    bool mapped = SDL_IsGameController(device_index) == SDL_TRUE;
+
+    app_log_always(
+        "[INPUT] SDL joystick index=%d name=\"%s\" path=%s guid=%s "
+        "vid=%04x pid=%04x mapped=%s\n",
+        device_index,
+        name ? name : "unknown",
+        path ? path : "unknown",
+        guid_string[0] ? guid_string : "unknown",
+        (unsigned)vendor,
+        (unsigned)product,
+        mapped ? "yes" : "no");
+
+    if (mapped) {
+        char *mapping = SDL_GameControllerMappingForDeviceIndex(device_index);
+        if (mapping) {
+            app_log("[INPUT] SDL mapping index=%d: %s\n", device_index, mapping);
+            SDL_free(mapping);
+        }
+    }
+    return mapped;
+}
+
 static void send_state(InputContext *ctx)
 {
     ChiakiControllerState state;
@@ -174,9 +206,14 @@ static void close_controller(InputContext *ctx)
 
 static bool open_controller(InputContext *ctx, int device_index)
 {
-    if (ctx->controller || device_index < 0 ||
-        !SDL_IsGameController(device_index))
+    if (ctx->controller || device_index < 0)
         return false;
+    if (!log_controller_candidate(device_index)) {
+        app_log_always(
+            "[INPUT] Joystick index=%d has no SDL GameController mapping; skipped\n",
+            device_index);
+        return false;
+    }
 
     SDL_GameController *controller = SDL_GameControllerOpen(device_index);
     if (!controller) {
@@ -221,11 +258,18 @@ static void open_first_controller(InputContext *ctx)
 {
     if (ctx->controller) return;
     int count = SDL_NumJoysticks();
+    if (count < 0) {
+        app_log_always("[INPUT] SDL joystick enumeration failed: %s\n",
+                       SDL_GetError());
+        return;
+    }
+    app_log_always("[INPUT] SDL enumerated %d joystick device(s)\n", count);
     for (int i = 0; i < count; ++i) {
         if (open_controller(ctx, i))
             return;
     }
-    app_log("[INPUT] No SDL GameController found; Magic Remote remains available\n");
+    app_log_always(
+        "[INPUT] No SDL GameController found; Magic Remote remains available\n");
 }
 
 static void handle_chord_button(InputContext *ctx, Uint8 button, bool pressed)

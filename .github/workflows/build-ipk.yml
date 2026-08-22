@@ -169,6 +169,20 @@ jobs:
             -o "$RUNNER_TEMP/config-import-test"
           "$RUNNER_TEMP/config-import-test"
 
+      - name: Test PSN account ID compatibility
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Isrc -Ichiaki-ng/lib/include \
+            tests/psn_account_id_test.c src/psn_account_id.c \
+            chiaki-ng/lib/src/base64.c \
+            -o "$RUNNER_TEMP/psn-account-id-test"
+          "$RUNNER_TEMP/psn-account-id-test"
+
+      - name: Test SDL Bluetooth DualSense routing
+        shell: bash
+        run: python3 tests/sdl_input_routing_test.py
+
       - name: Test stream configuration and recovery policy
         shell: bash
         run: |
@@ -200,13 +214,24 @@ jobs:
             -pthread \
             -o "$RUNNER_TEMP/dualsense-test"
           "$RUNNER_TEMP/dualsense-test"
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Ikernel/hid-playstation-compat \
+            tests/dualsense_input_report_test.c \
+            -o "$RUNNER_TEMP/dualsense-input-report-test"
+          "$RUNNER_TEMP/dualsense-input-report-test"
 
       - name: Test root bootstrap and scripts
         shell: bash
         run: |
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            $(pkg-config --cflags json-c) \
             -c src/root_feedback.c \
             -o "$RUNNER_TEMP/root-feedback.o"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/root_feedback_test.c \
+            $(pkg-config --cflags --libs json-c) \
+            -o "$RUNNER_TEMP/root-feedback-test"
+          "$RUNNER_TEMP/root-feedback-test"
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
             tests/bt_patch_test.c src/bt_patch.c \
             -o "$RUNNER_TEMP/bt-patch-test"
@@ -228,6 +253,12 @@ jobs:
           grep -F '"$STATE_DIR/load.sh" --rebind' packaging/root/install.sh
           grep -F '%s --rebind-connected' src/root_feedback.c
           grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
+          grep -F 'if [ "$patch_status" != 0 ]' packaging/root/load.sh
+          grep -F 'device_has_input_node' packaging/root/load.sh
+          grep -F 'HID_CONNECT_HIDRAW' \
+            kernel/hid-playstation-compat/hid-playstation.c
+          grep -F '.raw_event = dualsense_raw_event' \
+            kernel/hid-playstation-compat/hid-playstation.c
 
       - name: Build webOS 4.4 DualSense kernel module
         shell: bash

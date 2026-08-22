@@ -97,12 +97,35 @@ static void test_old_webos_bluetooth_address(void)
     assert(!dualsense_extract_bluetooth_address(block, address, 17));
 }
 
+static void test_old_webos_event_path(void)
+{
+    static const char block[] =
+        "I: Bus=0005 Vendor=054c Product=0ce6 Version=0100\n"
+        "N: Name=\"DualSense Wireless Controller\"\n"
+        "H: Handlers=js5 event41 \n";
+    char path[64];
+    assert(dualsense_extract_event_path(block, path, sizeof(path)));
+    assert(strcmp(path, "/dev/input/event41") == 0);
+
+    static const char sensor[] =
+        "N: Name=\"DualSense Wireless Controller Motion Sensors\"\n"
+        "H: Handlers=event42 \n";
+    assert(!dualsense_extract_event_path(sensor, path, sizeof(path)));
+
+    static const char remote[] =
+        "N: Name=\"LGE M-RCU\"\n"
+        "H: Handlers=js0 event3 \n";
+    assert(!dualsense_extract_event_path(remote, path, sizeof(path)));
+    assert(!dualsense_extract_event_path(block, path, 8));
+}
+
 int main(void)
 {
     test_crc();
     test_report();
     test_release_and_payload();
     test_old_webos_bluetooth_address();
+    test_old_webos_event_path();
     puts("DualSense protocol tests passed");
     return 0;
 }

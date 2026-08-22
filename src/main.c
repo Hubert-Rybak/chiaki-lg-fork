@@ -45,10 +45,14 @@
 #include "config_import.h"
 #include "app_id.h"
 #include "root_feedback.h"
+#include "psn_account_id.h"
 #include "webos_keys.h"
+#include "dualsense.h"
 
 #define CONFIG_PATH CHIAKI_APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
+#define DUALSENSE_SDL_RETRY_COUNT 20
+#define DUALSENSE_SDL_RETRY_MS    100
 
 #ifndef CHIAKI_NG_REVISION
 #define CHIAKI_NG_REVISION "unknown"
@@ -292,16 +296,12 @@ static bool host_port_ready(const char *host, uint16_t port, int timeout_ms)
 
 static void do_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
-    uint8_t account_id[8];
-    size_t decoded_len = sizeof(account_id);
-    if (chiaki_base64_decode(cfg->psn_account_id_b64,
-                             strlen(cfg->psn_account_id_b64),
-                             account_id, &decoded_len) != CHIAKI_ERR_SUCCESS)
+    uint64_t credential = 0;
+    if (!psn_account_id_to_uint64(cfg->psn_account_id_b64, &credential))
     {
-        app_log_always("[WAKEUP] Failed to decode psn_account_id — check config\n");
+        app_log_always("[WAKEUP] Failed to parse psn_account_id — check config\n");
         return;
     }
-    uint64_t credential = *(uint64_t *)account_id;
 
     // Send unicast to the PS5's IP address.
     app_log("[WAKEUP] Sending packet (unicast) to %s\n", cfg->host);
@@ -352,6 +352,56 @@ static void setup_ssl_ca_bundle(void)
         }
     }
     app_log_always("[SSL] WARNING: No CA bundle found\n");
+}
+
+static bool sdl_has_joystick_path(const char *expected_path)
+{
+    if (!expected_path || !expected_path[0])
+        return false;
+
+    int count = SDL_NumJoysticks();
+    for (int i = 0; i < count; ++i) {
+        const char *path = SDL_JoystickPathForIndex(i);
+        if (path && strcmp(path, expected_path) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* The root bootstrap can create the evdev node immediately before SDL starts.
+ * On webOS 6 the node is briefly visible in /proc while its app-jail access is
+ * still settling. SDL-webOS remembers that first failed probe, so polling the
+ * existing subsystem cannot recover it. Reinitialize only the unopened
+ * GameController/joystick subsystem, before InputContext owns any handles. */
+static bool sdl_recover_joystick_path(const char *expected_path)
+{
+    if (sdl_has_joystick_path(expected_path))
+        return true;
+
+    app_log_always("[INPUT] Waiting for controller node %s to become usable\n",
+                   expected_path);
+    for (int attempt = 1; attempt <= DUALSENSE_SDL_RETRY_COUNT; ++attempt) {
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+        SDL_Delay(DUALSENSE_SDL_RETRY_MS);
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
+            app_log_always(
+                "[INPUT] SDL controller retry %d/%d failed: %s\n",
+                attempt, DUALSENSE_SDL_RETRY_COUNT, SDL_GetError());
+            continue;
+        }
+        if (sdl_has_joystick_path(expected_path)) {
+            app_log_always(
+                "[INPUT] Controller node became usable after %d ms\n",
+                attempt * DUALSENSE_SDL_RETRY_MS);
+            return true;
+        }
+    }
+
+    app_log_always(
+        "[INPUT] Controller node %s remained unavailable after %d ms\n",
+        expected_path,
+        DUALSENSE_SDL_RETRY_COUNT * DUALSENSE_SDL_RETRY_MS);
+    return false;
 }
 
 // ── PSN cloud wakeup (direct HTTP — no chiaki holepunch library) ─────────────
@@ -586,47 +636,6 @@ static char *psn_list_devices(const char *access_token)
 }
 
 // ── Send wakeup via PSN session manager ──────────────────────────────────────
-// ── Decode base64 PSN account ID to numeric string ───────────────────────────
-// PSN stores account IDs as 8-byte big-endian values, base64-encoded.
-// The API wants the decimal string representation.
-static bool psn_decode_account_id(const char *b64, char *out, size_t out_sz)
-{
-    // base64 decode (simple inline — input is always 12 chars for 8 bytes)
-    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    uint8_t buf[8];
-    size_t b64_len = strlen(b64);
-    size_t pad = 0;
-    if (b64_len > 0 && b64[b64_len-1] == '=') pad++;
-    if (b64_len > 1 && b64[b64_len-2] == '=') pad++;
-
-    size_t out_len = 0;
-    uint32_t accum = 0;
-    int bits = 0;
-    for (size_t i = 0; i < b64_len && b64[i] != '='; i++) {
-        const char *p = strchr(t, b64[i]);
-        if (!p) continue;
-        accum = (accum << 6) | (uint32_t)(p - t);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            if (out_len < sizeof(buf))
-                buf[out_len++] = (uint8_t)(accum >> bits);
-            accum &= (1u << bits) - 1;
-        }
-    }
-    if (out_len != 8) {
-        app_log_always("[PSN] account_id base64 decode: expected 8 bytes, got %zu\n", out_len);
-        return false;
-    }
-
-    // Little-endian uint64 (PSN stores account ID as LE bytes in base64)
-    uint64_t id = 0;
-    for (int i = 7; i >= 0; i--)
-        id = (id << 8) | buf[i];
-
-    snprintf(out, out_sz, "%" PRIu64, id);
-    return true;
-}
 
 // ── Generate a client device UID ─────────────────────────────────────────────
 // chiaki-ng client DUIDs are 48 hex chars starting with "0000000700410080".
@@ -882,10 +891,11 @@ static void do_psn_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
     app_log_always("[PSN] Starting PSN cloud wakeup sequence\n");
 
-    // Step 0: Decode PSN account ID from base64 to numeric string
+    // Step 0: Convert canonical base64 or compatible decimal ID for the API.
     char account_id[32];
     if (!cfg->psn_account_id_b64 || !cfg->psn_account_id_b64[0] ||
-        !psn_decode_account_id(cfg->psn_account_id_b64, account_id, sizeof(account_id)))
+        !psn_account_id_to_decimal(cfg->psn_account_id_b64,
+                                   account_id, sizeof(account_id)))
     {
         app_log_always("[PSN] No valid psn_account_id — falling back to UDP wakeup\n");
         do_wakeup(cfg, log);
@@ -1330,11 +1340,39 @@ int main(int argc, char *argv[])
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+
+    /* The webOS app jail exposes Bluetooth PlayStation controllers through
+     * hidraw, but does not deliver their input reports reliably there.  Keep
+     * HIDAPI available for every other controller (and for USB DualSense),
+     * while routing Bluetooth DualSense/Edge input through the kernel evdev
+     * node created by hid-playstation.  SDL-webOS reads this hint during
+     * SDL_Init, so it must remain above that call. */
+    char dualsense_event_path[128] = {0};
+    const bool dualsense_event_found = dualsense_find_event_path(
+        dualsense_event_path, sizeof(dualsense_event_path));
+    const SDL_bool dualsense_device_hint = !dualsense_event_found ||
+        SDL_SetHint(SDL_HINT_JOYSTICK_DEVICE, dualsense_event_path);
+    const SDL_bool dualsense_ps5_hidapi_hint = !dualsense_event_found ||
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "0");
+    const SDL_bool dualsense_evdev_hint = !dualsense_event_found ||
+        SDL_SetHint("SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
+                    "0x054c/0x0ce6,0x054c/0x0df2");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    const bool dualsense_sdl_ready = !dualsense_event_found ||
+        sdl_recover_joystick_path(dualsense_event_path);
+    const bool dualsense_routed_to_evdev = dualsense_event_found &&
+        dualsense_evdev_hint && dualsense_device_hint &&
+        dualsense_ps5_hidapi_hint && dualsense_sdl_ready;
+    app_log_always(
+        "[INPUT] Bluetooth DualSense routing: %s; device path: %s\n",
+        dualsense_routed_to_evdev ? "evdev" :
+            (dualsense_event_found ? "evdev unavailable" : "automatic"),
+        dualsense_event_found ? dualsense_event_path
+                              : "not connected at startup");
 
     // NDL renders video on a hardware plane BELOW the app's GL surface.
     // To make the video visible we need our GL surface to be transparent.
@@ -1612,13 +1650,10 @@ show_launcher:
         return_to_launcher = true;
         goto cleanup_ss4s;
     }
-    uint8_t account_id_raw[8];
-    decoded_len = sizeof(account_id_raw);
-    if (chiaki_base64_decode(cfg.psn_account_id_b64,
-                             strlen(cfg.psn_account_id_b64),
-                             account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
+    uint8_t account_id_raw[PSN_ACCOUNT_ID_SIZE];
+    if (!psn_account_id_decode(cfg.psn_account_id_b64, account_id_raw))
     {
-        app_log("[APP] Failed to decode psn_account_id\n");
+        app_log("[APP] Failed to parse psn_account_id\n");
         snprintf(launcher_message, sizeof(launcher_message),
                  "PSN account ID is invalid. Import config again.");
         return_to_launcher = true;

@@ -3,9 +3,22 @@
 A native port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) for LG webOS smart TVs.
 Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
-> **Tested target:** PS5 + webOS 5+. PS4 and webOS 4.x paths are retained but have not been directly validated; a backend that does not expose native Opus is rejected cleanly instead of starting a broken A/V pipeline.
+> **Primary target:** PS5 + webOS 5+. PS4 and webOS 4.x paths are retained but have not been directly validated; a backend that does not expose native Opus is rejected cleanly instead of starting a broken A/V pipeline.
 
 > **AI disclosure:** This project was developed with assistance from [Claude.ai](https://claude.ai), [ChatGPT](https://chat.openai.com), and [Google Gemini](https://gemini.google.com). All generated code was reviewed, tested, and integrated by the project author.
+
+---
+
+## Tested on
+
+| TV | webOS / firmware | Platform | Kernel | Verified paths |
+|---|---|---|---|---|
+| LG OLED G1 (`OLED65G13LA`) | webOS `6.5.3`, firmware `03.53.45` | `O20N_DVB_EU`, ARM64 `lge,lg1212` | `4.4.84-229.kcl4tv.6` | Development-IPK installation and launcher startup; rooted Bluetooth correction and compatibility-driver activation; Bluetooth DualSense enhanced-report decoding and standardized SDL input in the launcher |
+
+The row above records the exact hardware used for regression checks on
+2026-08-23. Streaming and controller feedback still depend on the console,
+controller transport, and installed build, so hardware-specific reports should
+include the TV model as well as the webOS and firmware versions.
 
 ---
 
@@ -52,7 +65,7 @@ navigation, and package management. The comparison below refers to the original
 | Stream diagnostics | Bitrate, FPS, codec, latency, and a combined video error count | Adds two-second loss rate, lost/recovered/FEC totals, last-frame age, per-result A/V counters, IDR requests, reconnects, and a final attempt summary in the log |
 | Resolution choices | UI offered 1440p and 2160p even though libchiaki exposes presets only through 1080p | UI and config validation enforce the supported 1080p ceiling; legacy oversized values safely normalize to 1080p |
 | PS5 connection failures | An initial session failure can terminate the app | Nonrecoverable registration/protocol/capability errors return to the launcher; transient connection failures retry until canceled |
-| Config import | Imports registration credentials; the console IP must be entered separately | Also imports the manual-host address matching the selected registered console when available |
+| Config import | Imports registration credentials; the console IP must be entered separately | Also imports the matching manual-host address, correctly decodes Qt named escapes, and accepts canonical base64 or compatible decimal PSN account IDs |
 | Magic Remote | Basic remote handling | D-pad navigation, pointer hover/click, number-pad PIN/IP entry, and Red as Back/disconnect |
 | Installation identity | `org.homebrew.chiaki` | Release ID `org.homebrew.chiaki.fork` and development ID `org.homebrew.chiaki.fork.dev`, allowing all variants to coexist |
 | Development builds | No source revision in the installed identity | `DEV`-badged icon plus the exact commit hash in the launcher title, description, artifact name, and IPK filename |
@@ -156,7 +169,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 |---|---|---|---|
 | `host` | string | `""` | PS5/PS4 local IP address |
 | `ps5` | bool | `true` | `true` for PS5, `false` for PS4 |
-| `psn_account_id` | string | `""` | PSN account ID (base64) — written by import |
+| `psn_account_id` | string | `""` | PSN account ID. The canonical chiaki-ng eight-byte base64 form is preferred; a validated unsigned decimal ID is also accepted for compatibility |
 | `registered_key` | string | `""` | Registration key (base64) — written by import |
 | `rp_key` | string | `""` | Remote Play key (base64) — written by import |
 | `rp_key_type` | int | `0` | RP key type — written by import |
@@ -200,9 +213,27 @@ Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`
 
 Connect a gamepad via Bluetooth or USB. Supported controllers include DualSense, DualShock 4, Xbox Wireless Controller, and most HID-compliant gamepads.
 
-The app bundles the webosbrew SDL 2.30.12 backport and uses its standardized
-GameController mapping. This keeps the PlayStation face-button positions and
-trigger axes consistent across DualSense, DualShock, Xbox, and other pads.
+The app bundles the hardware-tested webosbrew SDL 2.30.12 webOS.5 build and
+uses its standardized GameController mapping. Its app-jail device-presence
+poll keeps controller handles stable on webOS 6.5.3. The newer webOS.6 raw
+uevent monitor is intentionally not used here: this firmware can report an
+input node removed while the same kernel node remains present, causing SDL to
+close a working controller. Hotplug can take up to three seconds to appear;
+restart the app if a very fast disconnect/reconnect reuses the same event
+index between polls.
+
+On webOS, Bluetooth DualSense and DualSense Edge devices are excluded from
+SDL's HIDAPI backend and routed through their kernel `/dev/input/event*` node.
+The TV app jail can enumerate `/dev/hidraw*` but does not reliably deliver
+Bluetooth input reports there. The active DualSense event handler is read from
+`/proc/bus/input/devices` and passed explicitly to SDL before initialization,
+which also covers event indices above 31. SDL's PS5 HIDAPI driver yields to
+evdev only when that active event handler is present. If the rooted bootstrap
+has only just created the event node, the app reinitializes SDL's unopened
+controller subsystem for up to two seconds until the app-jail node is usable;
+this avoids requiring a second launch. Pair the pad before launching the app;
+if it connects later, restart the app. Global HIDAPI and all non-PlayStation
+controller backends remain unchanged.
 
 Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
 haptic audio stream is translated to the controller motors. A Bluetooth
@@ -229,14 +260,21 @@ that scans the running Bluetooth daemon for one exact instruction signature and
 changes only the report-type immediate from `3` to `2`. The correction is made
 in process memory: the firmware library on disk is never replaced or edited,
 ambiguous/unknown builds fail closed, app launch reapplies it after daemon
-restarts, and uninstall restores the live byte when applicable.
+restarts, and uninstall restores the live byte when applicable. The compatibility
+driver is not loaded and Bluetooth pads are not rebound unless that correction
+is confirmed active. A failed driver probe or missing input node restores
+`hid-generic`, preserving basic controller input instead of leaving the pad
+unusable.
 
 The compatibility module is selected by CPU architecture, kernel release,
-device-tree platform, and module vermagic. It preserves the descriptor-derived
-input mapping while adding native `EV_FF` rumble and the DualSense initialization
-needed by Bluetooth trigger/light reports. The rumble mode follows Sony's
-firmware feature version when available and defaults to the current vibration-v2
-protocol. Installation diagnostics are written to
+device-tree platform, and module vermagic. It backports Sony's standardized
+gamepad parser for both simple and enhanced DualSense input reports, along with
+native `EV_FF` rumble and the initialization needed by Bluetooth trigger/light
+reports. This is necessary because enabling advanced Bluetooth output is a
+one-way switch to enhanced input reports for that connection; webOS 4.4's
+generic descriptor path does not decode them reliably. The rumble mode follows
+Sony's firmware feature version when available and defaults to the current
+vibration-v2 protocol. Installation diagnostics are written to
 `/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
 `/tmp/chiaki-hid-playstation.log`.
 
@@ -313,9 +351,21 @@ claim it before SDL starts. If it is connected later, restart the app once. The
 app deliberately avoids rebinding or sending advanced feedback through the
 wrong driver during an active controller session.
 
+**Controller is paired but the app detects no buttons**
+Set `log_level` to `"info"`, launch the app with the controller connected, and
+inspect the `[INPUT]` lines in `/tmp/chiaki.log`. They include SDL's device index,
+name, `/dev/input/event*` path, GUID, vendor/product IDs, and mapping decision.
+For rooted compatibility installs, also inspect
+`/tmp/chiaki-hid-playstation-install.log` and
+`/tmp/chiaki-hid-playstation.log`. Do not publish a complete verbose Chiaki log
+or `config.json`, because authentication material may be present.
+
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
 `/media/developer/apps/usr/palm/applications/org.homebrew.chiaki.fork/`
+After upgrading from a build with the old Qt escape parser, press **Import
+Config** again. The app reuses the saved `.imported` export; an already written
+`config.json` cannot repair previously corrupted registration bytes by itself.
 
 **App crashes on launch**
 Usually a malformed `config.json`. Check `/tmp/chiaki.log`. Delete the config file to let the app recreate defaults, then repeat the import.
@@ -465,7 +515,7 @@ configuration separate from development builds.
 | libevent | 2.1.12-stable | static | Event loop for chiaki-ng remote hole punching |
 | GF-Complete | master | static | Erasure coding (chiaki dependency) |
 | Jerasure | 2.0 | static | FEC (chiaki dependency) |
-| SDL-webOS | 2.30.12 | bundled dynamic | Window/GL surface, controller mapping/rumble, TV remote input |
+| SDL-webOS | 2.30.12 webOS.5 | bundled dynamic | Window/GL surface, stable controller polling, mapping/rumble, TV remote input |
 | nanopb | 0.4.x | static | Protobuf (chiaki submodule) |
 
 ---

@@ -121,18 +121,20 @@ NJOBS=$(nproc)
 # The TV's SDL 2.0.10 predates DualSense. Use the same webosbrew build proven by
 # punktfunk-webos, both for the standardized controller mapping and evdev FF.
 install_sdl2_webos() {
-    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_VERSION"
+    # Include the backport release in the marker: webOS fixes can change while
+    # the upstream SDL version and SONAME remain the same.
+    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_RELEASE"
     local runtime="$OUR_STAGING/lib/$SDL2_WEBOS_SONAME"
     if [[ -f "$marker" && -f "$runtime" &&
           -f "$OUR_STAGING/include/SDL2/SDL_gamecontroller.h" ]]; then
-        echo "-- SDL-webOS $SDL2_WEBOS_VERSION: skip"
+        echo "-- SDL-webOS $SDL2_WEBOS_RELEASE: skip"
         return
     fi
 
     local asset="SDL2-$SDL2_WEBOS_VERSION-webos.tar.gz"
     local archive="/tmp/$asset"
     local url="https://github.com/webosbrew/SDL-webOS/releases/download/$SDL2_WEBOS_RELEASE/$asset"
-    echo "-- Installing SDL-webOS $SDL2_WEBOS_VERSION"
+    echo "-- Installing SDL-webOS $SDL2_WEBOS_RELEASE"
     if [[ ! -f "$archive" ]] ||
        ! echo "$SDL2_WEBOS_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
         rm -f "$archive"
