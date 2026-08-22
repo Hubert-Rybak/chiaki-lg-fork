@@ -31,4 +31,10 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
 void ui_render_stats_overlay(SDL_Renderer *renderer, const char *text);
 
 // Draw temporary pop up at launch for stats overlay
+
 void ui_render_hint(SDL_Renderer *r, const char *text, float opacity);
+
+// Compute the integer output-pixel scale for the current renderer (1 on a
+// 1080p surface, 2 on a native 2160p surface, ...). Call once after renderer
+// creation; scales all UI drawing primitives.
+void ui_set_output_scale(SDL_Renderer *renderer);

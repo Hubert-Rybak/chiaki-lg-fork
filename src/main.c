@@ -1354,10 +1354,24 @@ int main(int argc, char *argv[])
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  8);
 
+    // Size the app surface to the display's native resolution when the
+    // platform grants it (4K panels), so UI text is not compositor-upscaled
+    // from a fixed 1080p surface. Falls back to 1920x1080 if the query fails.
+    SDL_DisplayMode dm;
+    int win_w = 1920, win_h = 1080;
+    if (SDL_GetCurrentDisplayMode(0, &dm) == 0 && dm.w > 0 && dm.h > 0) {
+        win_w = dm.w;
+        win_h = dm.h;
+    } else {
+        app_log("[APP] Display mode query failed (%s); using 1920x1080\n",
+                SDL_GetError());
+    }
+    app_log_always("[APP] Window surface: %dx%d\n", win_w, win_h);
+
     g_window = SDL_CreateWindow(
         "Chiaki",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        1920, 1080,
+        win_w, win_h,
         SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_SHOWN);
 
     if (!g_window)
@@ -1369,10 +1383,9 @@ int main(int argc, char *argv[])
         g_window = SDL_CreateWindow(
             "Chiaki",
             SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-            1920, 1080,
+            win_w, win_h,
             SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN);
     }
-
     if (!g_window)
     {
         app_log("[APP] SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -1400,6 +1413,8 @@ int main(int argc, char *argv[])
         SDL_Quit();
         return 1;
     }
+
+    ui_set_output_scale(g_renderer);
 
     // Clear to fully transparent black immediately so the NDL plane is
     // visible as soon as the first frame is presented.
@@ -1446,7 +1461,6 @@ show_launcher:
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
-    SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
     UIResult ui_result = ui_run_registration(
         g_renderer, &cfg, config_path, &chiaki_log, launcher_message, input_ctx);
     launcher_message[0] = '\0';

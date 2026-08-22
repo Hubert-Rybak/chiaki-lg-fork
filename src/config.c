@@ -129,6 +129,8 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->video_height     = json_get_int(root,  "video_height",     1080);
     cfg->video_fps        = json_get_int(root,  "video_fps",        60);
     cfg->video_bitrate    = json_get_int(root,  "video_bitrate",    15000);
+    cfg->probe_width      = json_get_int(root,  "probe_width",      0);
+    cfg->probe_height     = json_get_int(root,  "probe_height",     0);
     cfg->packet_loss_max  = json_get_double_range(root, "packet_loss_max",
                                                    0.05, 0.0, 1.0);
     cfg->idr_on_fec_failure = json_get_bool_strict(root, "idr_on_fec_failure", true);
@@ -151,6 +153,18 @@ int config_load(AppConfig *cfg, const char *path)
                 cfg->video_width, cfg->video_height);
         cfg->video_width = 1920;
         cfg->video_height = 1080;
+    }
+
+    if (cfg->probe_width > 0 && cfg->probe_height > 0 &&
+        (cfg->probe_width != cfg->video_width ||
+         cfg->probe_height != cfg->video_height)) {
+        fprintf(stderr,
+                "[CONFIG] EXPERIMENTAL resolution probe: overriding %dx%d with %dx%d "
+                "(PS5 may clamp or refuse; remove probe_width/probe_height to restore)\n",
+                cfg->video_width, cfg->video_height,
+                cfg->probe_width, cfg->probe_height);
+        cfg->video_width = cfg->probe_width;
+        cfg->video_height = cfg->probe_height;
     }
     if (cfg->video_fps != 30 && cfg->video_fps != 60) {
         fprintf(stderr, "[CONFIG] Warning: video_fps must be 30 or 60; using 60\n");

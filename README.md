@@ -31,6 +31,25 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
 ---
 
+## Resolution and 4K
+
+Remote Play streams top out at **1080p60**. This is a Sony protocol ceiling, not a client limitation — upstream chiaki-ng negotiates the same four resolution presets (360p–1080p), and its optional "4K-ish" picture improvements are display-side shader upscaling (libplacebo: FSR, FSRCNNX, Lanczos variants) inside its own renderer, which does not exist in this fork's architecture.
+
+There is nothing to add on the video path: the decoded 1080p HEVC/H.264 bitstream is rendered into webOS NDL's dedicated hardware video plane, which is panel-native — your 4K TV's own video processor scales it to fill the panel, generally with better results than software upscalers.
+
+For empirical testing only, two hidden config keys override the resolution requested from the console:
+
+```json
+"probe_width": 3840,
+"probe_height": 2160
+```
+
+- When both are nonzero they replace `video_width`/`video_height` everywhere (launch spec sent to the PS5, decoder declaration, logs) and are logged loudly at startup as `[CONFIG] EXPERIMENTAL resolution probe`.
+- Sony consoles are expected to clamp or refuse sizes above 1080p; watch `[STREAM] Effective profile:` and ss4s `ReloadWithSize(...)` lines in `/tmp/chiaki.log` to see what your console actually does.
+- The keys are preserved by config imports but are not exposed in the Settings UI. Remove them to restore normal behavior. Values above 1080p set via `video_width`/`video_height` continue to normalize down to 1080p exactly as before.
+
+---
+
 ## How this fork differs from the original Chiaki-lg build
 
 This fork keeps the original Chiaki-lg hardware-accelerated streaming pipeline,

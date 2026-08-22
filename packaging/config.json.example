@@ -13,6 +13,8 @@
     "video_height": 1080,
     "video_fps": 60,
     "video_bitrate": 15000,
+    "probe_width": 0,
+    "probe_height": 0,
     "video_codec": "h265",
     "packet_loss_max": 0.05,
     "idr_on_fec_failure": true,

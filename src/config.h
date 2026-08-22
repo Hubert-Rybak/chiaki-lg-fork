@@ -11,6 +11,8 @@ typedef struct {
     int      video_height;
     int      video_fps;
     int      video_bitrate;
+    int      probe_width;       // EXPERIMENTAL: override stream width sent to console (0 = off)
+    int      probe_height;      // EXPERIMENTAL: override stream height sent to console (0 = off)
     double   packet_loss_max;   // maximum loss reported to Chiaki congestion control (0.0-1.0)
     bool     idr_on_fec_failure;
     bool     ps5;

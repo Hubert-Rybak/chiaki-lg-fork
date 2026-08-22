@@ -247,13 +247,15 @@ static void process_line(IniData *d, const char *section,
 static void extract_existing_host(const char *config_path,
                                    char *host_out, size_t host_len,
                                    int *width, int *height, int *fps,
+                                   int *probe_w, int *probe_h,
                                    char *refresh_out, size_t refresh_len,
                                    double *packet_loss_max,
                                    bool *idr_on_fec_failure)
 {
     *host_out = '\0';
     if (refresh_out && refresh_len) *refresh_out = '\0';
-    *width = 1920; *height = 1080; *fps = 60;
+    if (probe_w) *probe_w = 0;
+    if (probe_h) *probe_h = 0;
     if (packet_loss_max) *packet_loss_max = 0.05;
     if (idr_on_fec_failure) *idr_on_fec_failure = true;
 
@@ -301,6 +303,12 @@ static void extract_existing_host(const char *config_path,
     if (hp) { int v = atoi(strchr(hp, ':') + 1); if (v > 0) *height = v; }
     const char *fp2 = strstr(buf, "\"video_fps\"");
     if (fp2) { int v = atoi(strchr(fp2, ':') + 1); if (v > 0) *fps = v; }
+
+    /* Optional: preserve experimental resolution-probe keys */
+    const char *pw = strstr(buf, "\"probe_width\"");
+    if (pw && probe_w) { int v = atoi(strchr(pw, ':') + 1); if (v > 0) *probe_w = v; }
+    const char *ph = strstr(buf, "\"probe_height\"");
+    if (ph && probe_h) { int v = atoi(strchr(ph, ':') + 1); if (v > 0) *probe_h = v; }
 
     const char *lp = strstr(buf, "\"packet_loss_max\"");
     if (lp && packet_loss_max) {
@@ -491,10 +499,12 @@ ChiakiImportResult config_try_import_chiaki_ini(
     /* ── Preserve host and video settings from any existing config.json ───── */
     char host[256];
     int  vid_w, vid_h, vid_fps;
+    int  existing_probe_w = 0, existing_probe_h = 0;
     char existing_refresh[2048] = "";
     double packet_loss_max = 0.05;
     bool idr_on_fec_failure = true;
     extract_existing_host(config_path, host, sizeof(host), &vid_w, &vid_h, &vid_fps,
+                          &existing_probe_w, &existing_probe_h,
                           existing_refresh, sizeof(existing_refresh),
                           &packet_loss_max, &idr_on_fec_failure);
 
@@ -552,6 +562,8 @@ ChiakiImportResult config_try_import_chiaki_ini(
         "    \"video_height\": %d,\n"
         "    \"video_fps\": %d,\n"
         "    \"video_bitrate\": %d,\n"
+        "    \"probe_width\": %d,\n"
+        "    \"probe_height\": %d,\n"
         "    \"video_codec\": \"%s\",\n"
         "    \"packet_loss_max\": %.2f,\n"
         "    \"idr_on_fec_failure\": %s,\n"
@@ -571,6 +583,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         esc_rpk,
         d.rp_key_type,
         vid_w, vid_h, vid_fps,
+        existing_probe_w, existing_probe_h,
         bitrate,
         codec,
         packet_loss_max,

@@ -70,6 +70,22 @@ int main(void)
         fail("valid advanced settings were not retained");
     config_free(&config);
 
+    write_config(path,
+        "{\n"
+        "  \"host\": \"192.0.2.1\",\n"
+        "  \"video_width\": 1280,\n"
+        "  \"video_height\": 720,\n"
+        "  \"probe_width\": 2560,\n"
+        "  \"probe_height\": 1440\n"
+        "}\n");
+    if (config_load(&config, path) != 0)
+        fail("probe-values fixture did not load");
+    if (config.video_width != 2560 || config.video_height != 1440)
+        fail("experimental probe keys did not override stream resolution");
+    if (config.probe_width != 2560 || config.probe_height != 1440)
+        fail("probe keys were not retained on the config struct");
+    config_free(&config);
+
     unlink(path);
     puts("config_test: passed");
     return 0;

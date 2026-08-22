@@ -13,6 +13,7 @@
 #include <ctype.h>
 
 #include "config_import.h"
+#include "app_log.h"
 
 /* ── Layout ──────────────────────────────────────────────────────────────────
  * Two-panel layout:
@@ -179,6 +180,12 @@ static const uint8_t FONT_DATA[][5] = {
 
 /* ── Primitive drawing helpers ───────────────────────────────────────────── */
 
+/* Output-pixel scale factor: the logical canvas is SCREEN_W x SCREEN_H; when
+ * the renderer output is larger (e.g. a native 4K surface), every rect emitted
+ * by these primitives is multiplied by g_ui_scale so the layout constants and
+ * hit-testing math can stay in canvas coordinates. */
+static int g_ui_scale = 1;
+
 static void set_color(SDL_Renderer *r, int R, int G, int B, int A)
 {
     SDL_SetRenderDrawColor(r, R, G, B, A);
@@ -186,13 +193,15 @@ static void set_color(SDL_Renderer *r, int R, int G, int B, int A)
 
 static void fill_rect(SDL_Renderer *r, int x, int y, int w, int h)
 {
-    SDL_Rect rect = {x, y, w, h};
+    SDL_Rect rect = {x * g_ui_scale, y * g_ui_scale,
+                     w * g_ui_scale, h * g_ui_scale};
     SDL_RenderFillRect(r, &rect);
 }
 
 static void draw_rect_outline(SDL_Renderer *r, int x, int y, int w, int h)
 {
-    SDL_Rect rect = {x, y, w, h};
+    SDL_Rect rect = {x * g_ui_scale, y * g_ui_scale,
+                     w * g_ui_scale, h * g_ui_scale};
     SDL_RenderDrawRect(r, &rect);
 }
 
@@ -292,6 +301,16 @@ static void fill_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int r
 static void hline(SDL_Renderer *r, int x, int y, int w)
 {
     fill_rect(r, x, y, w, 1);
+}
+
+void ui_set_output_scale(SDL_Renderer *r)
+{
+    int w = 0, h = 0;
+    g_ui_scale = 1;
+    if (SDL_GetRendererOutputSize(r, &w, &h) == 0 && h > SCREEN_H)
+        g_ui_scale = h / SCREEN_H;
+    app_log_always("[APP] UI output scale: %d (renderer output %dx%d)\n",
+                   g_ui_scale, w, h);
 }
 
 /* ── Code block ─────────────────────────────────────────────────────────── */
