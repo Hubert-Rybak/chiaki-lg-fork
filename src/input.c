@@ -15,8 +15,8 @@
 #define CHORD_WINDOW_MS 100u
 #define HAPTIC_HOLD_MS   50u
 #define HAPTIC_RUMBLE_MIN_STRENGTH 100u
-/* DualSense Bluetooth advertises 1 kHz sensors; Chiaki needs at most 125 Hz. */
-#define MOTION_SEND_INTERVAL_MS 8u
+/* Bound continuous 1 kHz DualSense motion/touch updates to Chiaki's cadence. */
+#define CONTINUOUS_INPUT_SEND_INTERVAL_MS 8u
 
 typedef enum {
     CHORD_NONE = 0,
@@ -42,6 +42,8 @@ struct InputContext {
     bool motion_reset_pending;
     bool motion_dirty;
     uint64_t last_motion_send_ms;
+    bool touch_motion_dirty;
+    uint64_t last_touch_motion_send_ms;
 
     bool back_held;
     bool start_held;
@@ -81,6 +83,8 @@ static void reset_controller_state_locked(InputContext *ctx)
     ctx->motion_reset_pending = false;
     ctx->motion_dirty = false;
     ctx->last_motion_send_ms = 0;
+    ctx->touch_motion_dirty = false;
+    ctx->last_touch_motion_send_ms = 0;
 }
 
 static uint64_t monotonic_ms(void)
@@ -482,6 +486,11 @@ static void handle_controller_touchpad(
     bool changed = controller_features_handle_touch(
         &ctx->features, &ctx->state, phase,
         event->touchpad, event->finger, event->x, event->y);
+    bool send_immediately = changed && phase != CONTROLLER_TOUCH_MOTION;
+    if (changed && phase == CONTROLLER_TOUCH_MOTION)
+        ctx->touch_motion_dirty = true;
+    else if (changed && phase == CONTROLLER_TOUCH_UP)
+        ctx->touch_motion_dirty = false;
     bool first_event = changed && !ctx->touch_event_logged;
     if (first_event)
         ctx->touch_event_logged = true;
@@ -494,7 +503,8 @@ static void handle_controller_touchpad(
             "[INPUT] First touch-surface event received (touchpad=%d finger=%d)\n",
             (int)event->touchpad, (int)event->finger);
     }
-    send_state(ctx);
+    if (send_immediately)
+        send_state(ctx);
 }
 
 static void handle_controller_sensor(
@@ -849,10 +859,18 @@ void input_pump(InputContext *ctx)
 
     bool motion_changed = !motion_reset && ctx->motion_dirty &&
         (ctx->last_motion_send_ms == 0 ||
-         now - ctx->last_motion_send_ms >= MOTION_SEND_INTERVAL_MS);
+         now - ctx->last_motion_send_ms >= CONTINUOUS_INPUT_SEND_INTERVAL_MS);
     if (motion_changed) {
         ctx->motion_dirty = false;
         ctx->last_motion_send_ms = now;
+    }
+    bool touch_motion_changed = ctx->touch_motion_dirty &&
+        (ctx->last_touch_motion_send_ms == 0 ||
+         now - ctx->last_touch_motion_send_ms >=
+             CONTINUOUS_INPUT_SEND_INTERVAL_MS);
+    if (touch_motion_changed) {
+        ctx->touch_motion_dirty = false;
+        ctx->last_touch_motion_send_ms = now;
     }
 
     float base_multiplier = ctx->is_dualsense ? 1.0f : ctx->rumble_multiplier;
@@ -882,7 +900,7 @@ void input_pump(InputContext *ctx)
     if (motion_reset) {
         app_log_always("[INPUT] Motion controls recalibrated\n");
         send_state(ctx);
-    } else if (chord_changed || motion_changed) {
+    } else if (chord_changed || motion_changed || touch_motion_changed) {
         send_state(ctx);
     }
     if (!ctx->controller) return;
