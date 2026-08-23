@@ -24,6 +24,17 @@
 #define ROOT_BOOTSTRAP_TIMEOUT_MS 10000
 #define ROOT_BOOTSTRAP_POLL_MS 50
 #define ROOT_RESPONSE_MAX 4096
+#define ROOT_REBOOT_MARKER "/tmp/chiaki-dualsense-reboot-required"
+
+static bool log_legacy_reboot_warning(void)
+{
+    if (access(ROOT_REBOOT_MARKER, F_OK) != 0)
+        return false;
+
+    app_log_always("[ROOT] A legacy Chiaki controller module may still be "
+                   "loaded; reboot the TV before controller testing\n");
+    return true;
+}
 
 static void copy_root_error(char *out, size_t out_size, const char *message)
 {
@@ -84,6 +95,7 @@ static void drain_root_response(
 
 void root_feedback_bootstrap(void)
 {
+    bool reboot_warning_logged = log_legacy_reboot_warning();
     if (access(LUNA_SEND_PUB, X_OK) != 0)
         return;
 
@@ -91,7 +103,7 @@ void root_feedback_bootstrap(void)
     int n = snprintf(installer, sizeof(installer), "%s/root/install.sh",
                      CHIAKI_APP_DIR);
     if (n < 0 || (size_t)n >= sizeof(installer) || access(installer, R_OK) != 0) {
-        app_log("[ROOT] Bundled DualSense installer unavailable: %s\n",
+        app_log("[ROOT] Bundled compatibility cleanup unavailable: %s\n",
                 n > 0 ? installer : "invalid path");
         return;
     }
@@ -99,10 +111,10 @@ void root_feedback_bootstrap(void)
     /* APP_ID is compile-time validated to [a-z0-9.-], so no shell quoting is needed. */
     char payload[1200];
     n = snprintf(payload, sizeof(payload),
-                 "{\"command\":\"/bin/sh %s %s --rebind-connected\"}",
+                 "{\"command\":\"/bin/sh %s %s\"}",
                  installer, CHIAKI_APP_DIR);
     if (n < 0 || (size_t)n >= sizeof(payload)) {
-        app_log("[ROOT] DualSense installer command is too long\n");
+        app_log("[ROOT] Compatibility cleanup command is too long\n");
         return;
     }
 
@@ -156,6 +168,8 @@ void root_feedback_bootstrap(void)
             close(response_pipe[0]);
             app_log_always("[ROOT] Could not wait for Homebrew root bootstrap: %s\n",
                            strerror(errno));
+            if (!reboot_warning_logged)
+                (void)log_legacy_reboot_warning();
             return;
         }
         if (elapsed_ms >= ROOT_BOOTSTRAP_TIMEOUT_MS) {
@@ -165,7 +179,9 @@ void root_feedback_bootstrap(void)
                                 sizeof(response), &response_used);
             close(response_pipe[0]);
             app_log_always("[ROOT] Homebrew root bootstrap timed out; "
-                           "continuing without controller rebind\n");
+                           "continuing without legacy-state cleanup\n");
+            if (!reboot_warning_logged)
+                (void)log_legacy_reboot_warning();
             return;
         }
         usleep(ROOT_BOOTSTRAP_POLL_MS * 1000);
@@ -179,7 +195,7 @@ void root_feedback_bootstrap(void)
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
         root_exec_response_success(response, response_error,
                                    sizeof(response_error))) {
-        app_log_always("[ROOT] DualSense compatibility bootstrap completed\n");
+        app_log_always("[ROOT] Legacy compatibility state checked and cleaned\n");
     } else {
         if (!response_error[0])
             copy_root_error(response_error, sizeof(response_error),
@@ -187,4 +203,6 @@ void root_feedback_bootstrap(void)
         app_log_always("[ROOT] Compatibility bootstrap unavailable: %s "
                        "(wait_status=%d)\n", response_error, status);
     }
+    if (!reboot_warning_logged)
+        (void)log_legacy_reboot_warning();
 }

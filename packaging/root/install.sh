@@ -2,24 +2,24 @@
 set -eu
 
 BUNDLE_ROOT=
-REBIND_CONNECTED=false
 if [ "$#" -gt 0 ]; then
     BUNDLE_ROOT=$1
     shift
 fi
 for option in "$@"; do
     case "$option" in
-        --rebind-connected) REBIND_CONNECTED=true ;;
+        --rebind-connected) : ;; # accepted for older app binaries
         *) echo "Unknown option: $option" >&2; exit 2 ;;
     esac
 done
+
 LOG=/tmp/chiaki-hid-playstation-install.log
 STATE_DIR=/var/lib/webosbrew/chiaki-dualsense
-HOOK_DIR=/var/lib/webosbrew/init.d
-HOOK_PATH=$HOOK_DIR/90-chiaki-dualsense
+HOOK_PATH=/var/lib/webosbrew/init.d/90-chiaki-dualsense
+REBOOT_MARKER=/tmp/chiaki-dualsense-reboot-required
 
 exec >>"$LOG" 2>&1
-echo "=== install $(date) ==="
+echo "=== safe cleanup $(date) ==="
 
 if [ "$(id -u)" != 0 ]; then
     echo "Homebrew root service is not elevated; leaving the system unchanged."
@@ -30,104 +30,50 @@ if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/root" ]; then
     exit 2
 fi
 
-source_patcher=$BUNDLE_ROOT/root/chiaki-bt-patch
-if [ ! -s "$source_patcher" ]; then
-    echo "The IPK does not contain root/chiaki-bt-patch"
-    exit 3
+#
+# The previously bundled modules have only a generic 4.4.84 vermagic and were
+# built from LG source releases that do not match the running firmware kernels.
+# Without CONFIG_MODVERSIONS, successful insmod cannot establish core-HID ABI
+# compatibility.  Remove an older app-owned installation and fail closed until
+# a module has an explicit, exact target-kernel provenance manifest.
+#
+module_loaded=false
+if grep -q '^hid_playstation ' /proc/modules 2>/dev/null; then
+    module_loaded=true
 fi
-
-module_rel=
-module_vermagic_arch=
-arch=$(uname -m)
-release=$(uname -r)
-case "$arch:$release" in
-    aarch64:4.4.84*)
-        compatible=$(tr '\000' '\n' < /proc/device-tree/compatible 2>/dev/null || true)
-        if printf '%s\n' "$compatible" | grep -qx 'lge,lg1212'; then
-            module_rel=modules/aarch64/4.4.84/lg1212/hid-playstation.ko
-            module_vermagic_arch=aarch64
-        else
-            echo "No ABI-matched module for $arch kernel $release (${compatible:-unknown platform})."
+if [ -s "$STATE_DIR/hid-playstation.ko" ] && [ "$module_loaded" = true ]; then
+    marker_tmp=
+    cleanup_marker_tmp() {
+        if [ -n "$marker_tmp" ]; then
+            rm -f "$marker_tmp"
         fi
-        ;;
-    armv7l:4.4.84-*.koli.*)
-        # koli is LG's release codename for the 32-bit MStar LM21U platform.
-        module_rel=modules/armv7l/4.4.84/lm21u/hid-playstation.ko
-        module_vermagic_arch=ARMv7
-        ;;
-    *)
-        echo "No compatibility module for $arch kernel $release."
-        ;;
-esac
-source_module=
-if [ -n "$module_rel" ]; then
-    source_module=$BUNDLE_ROOT/root/$module_rel
-    if [ ! -s "$source_module" ]; then
-        echo "The IPK does not contain $module_rel"
-        exit 3
-    fi
-
-    vermagic=$(modinfo -F vermagic "$source_module" 2>/dev/null || true)
-    case "$vermagic" in
-        "4.4.84 "*"$module_vermagic_arch"*) ;;
-        *)
-            echo "Refusing incompatible module vermagic: $vermagic"
-            exit 4
-            ;;
-    esac
+    }
+    trap cleanup_marker_tmp 0
+    trap 'exit 75' 1 2 15
+    marker_tmp=$(mktemp "${REBOOT_MARKER}.XXXXXX") || {
+        echo "Could not create the legacy-module reboot marker."
+        exit 75
+    }
+    printf '%s\n' "legacy-module-loaded" > "$marker_tmp"
+    chmod 0644 "$marker_tmp"
+    mv -f "$marker_tmp" "$REBOOT_MARKER"
+    marker_tmp=
+    trap - 0 1 2 15
+elif [ "$module_loaded" = false ]; then
+    # Preserve an existing warning until reboot while the module remains loaded.
+    rm -f "$REBOOT_MARKER"
 fi
 
-if [ -z "$source_module" ]; then
-    echo "No compatibility module selected; leaving the system unchanged."
-    exit 77
-fi
-
-mkdir -p "$STATE_DIR" "$HOOK_DIR"
-cp "$source_patcher" "$STATE_DIR/chiaki-bt-patch.new"
-chmod 0755 "$STATE_DIR/chiaki-bt-patch.new"
-mv "$STATE_DIR/chiaki-bt-patch.new" "$STATE_DIR/chiaki-bt-patch"
-cp "$BUNDLE_ROOT/root/load.sh" "$STATE_DIR/load.sh"
-chmod 0755 "$STATE_DIR/load.sh"
-cp "$BUNDLE_ROOT/root/uninstall.sh" "$STATE_DIR/uninstall.sh"
-chmod 0755 "$STATE_DIR/uninstall.sh"
-
-cp "$source_module" "$STATE_DIR/hid-playstation.ko.new"
-chmod 0644 "$STATE_DIR/hid-playstation.ko.new"
-mv "$STATE_DIR/hid-playstation.ko.new" "$STATE_DIR/hid-playstation.ko"
-
-set +e
-if [ "$REBIND_CONNECTED" = true ]; then
-    "$STATE_DIR/load.sh" --rebind
+if [ -d "$STATE_DIR" ] || [ -e "$HOOK_PATH" ]; then
+    echo "Removing legacy unverified DualSense compatibility installation."
+    /bin/sh "$BUNDLE_ROOT/root/uninstall.sh"
 else
-    "$STATE_DIR/load.sh"
+    rm -f "$HOOK_PATH"
 fi
-load_status=$?
-set -e
-case "$load_status" in
-    0)
-        if [ "$REBIND_CONNECTED" = true ]; then
-            echo "Safe connected-controller rebind pass completed before SDL startup."
-        else
-            echo "Connected controllers were left untouched."
-        fi
-        cp "$BUNDLE_ROOT/root/boot-hook.sh" "$HOOK_PATH"
-        chmod 0755 "$HOOK_PATH"
-        ;;
-    75)
-        # The Bluetooth daemon was not ready, so load.sh deliberately left the
-        # compatibility module and any connected controller on the safe generic
-        # path. The boot hook and next app launch will retry.
-        echo "Bluetooth service is not ready; compatibility activation was safely deferred."
-        cp "$BUNDLE_ROOT/root/boot-hook.sh" "$HOOK_PATH"
-        chmod 0755 "$HOOK_PATH"
-        ;;
-    77)
-        echo "No compatible kernel module or Bluetooth runtime patch; leaving no boot hook."
-        rm -f "$HOOK_PATH"
-        rm -rf "$STATE_DIR"
-        ;;
-    *)
-        echo "Compatibility activation failed with status $load_status."
-        exit "$load_status"
-        ;;
-esac
+
+if [ "$module_loaded" = true ]; then
+    echo "A PlayStation module is currently loaded; reboot if it came from an older Chiaki build."
+fi
+
+echo "No ABI-verified compatibility module is bundled; native HID left unchanged."
+exit 0

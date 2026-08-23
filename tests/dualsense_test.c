@@ -43,7 +43,7 @@ static void test_report(void)
     assert(report[3 + 36] == 0x62);
     assert(report[3 + 43] == 0x1f);
     assert(report[3 + 44] == 1 && report[3 + 45] == 2 && report[3 + 46] == 3);
-    assert((report[3] & 0x01) == 0); /* never fight SDL/evdev rumble */
+    assert((report[3] & 0x01) == 0); /* quarantined report owns no rumble */
 
     uint8_t signed_data[DUALSENSE_REPORT_LEN - 3];
     signed_data[0] = 0xa2;

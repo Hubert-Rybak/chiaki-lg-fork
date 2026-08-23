@@ -148,18 +148,13 @@ add_executable(chiaki-webos
     src/audio.c
     src/input.c
     src/controller_features.c
+    src/rumble_policy.c
     src/dualsense.c
     src/root_feedback.c
     src/ui.c
     src/stats.c
     src/stream_health.c
 )
-
-add_executable(chiaki-bt-patch
-    tools/chiaki_bt_patch.c
-    src/bt_patch.c
-)
-target_include_directories(chiaki-bt-patch PRIVATE src/)
 
 target_compile_definitions(chiaki-webos PRIVATE
     CHIAKI_APP_ID=\"${APP_ID}\"
@@ -217,7 +212,6 @@ target_link_options(chiaki-webos PRIVATE
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS chiaki-webos RUNTIME DESTINATION .)
-install(TARGETS chiaki-bt-patch RUNTIME DESTINATION root)
 install(FILES
     packaging/appinfo.json
     packaging/icon.png
@@ -228,6 +222,8 @@ install(FILES
 install(DIRECTORY packaging/root/
     DESTINATION root
     USE_SOURCE_PERMISSIONS
+    PATTERN "modules" EXCLUDE
+    PATTERN "chiaki-bt-patch" EXCLUDE
 )
 if(SDL2_BUNDLED_LIBRARY)
     if(NOT EXISTS "${SDL2_BUNDLED_LIBRARY}")
@@ -249,8 +245,9 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
 set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
 
 add_custom_target(ipk
-    DEPENDS chiaki-webos chiaki-bt-patch
+    DEPENDS chiaki-webos
 
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "${IPK_STAGING_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${IPK_STAGING_DIR}"
     COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${IPK_STAGING_DIR}"
     COMMAND ares-package "${IPK_STAGING_DIR}" -o "${CMAKE_BINARY_DIR}"

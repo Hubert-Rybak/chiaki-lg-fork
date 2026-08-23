@@ -1250,8 +1250,7 @@ int main(int argc, char *argv[])
 
     app_log("[APP] config_path = %s\n", config_path);
 
-    /* Rooted TVs can activate the bundled, strictly compatibility-gated
-     * DualSense driver and old-webOS Bluetooth correction through Homebrew. */
+    /* Remove app-owned driver/patch state from older development builds. */
     root_feedback_bootstrap();
 
     signal(SIGINT,  sig_handler);

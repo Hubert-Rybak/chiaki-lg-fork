@@ -31,6 +31,21 @@ for forced_route in (
 if 'SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0")' in source:
     raise SystemExit("SDL HIDAPI must remain enabled")
 
+if "dualsense_feedback_new(" in input_source:
+    raise SystemExit(
+        "Fork-based Luna feedback must remain disabled in the streaming process"
+    )
+
+for safe_output_wiring in (
+    "rumble_policy_prepare",
+    "SDL_JoystickCurrentPowerLevel",
+    "SDL is the sole controller-output path",
+):
+    if safe_output_wiring not in input_source:
+        raise SystemExit(
+            f"Safe DualSense output/diagnostic wiring is missing: {safe_output_wiring}"
+        )
+
 for feature_wiring in (
     "SDL_CONTROLLERTOUCHPADDOWN",
     "SDL_CONTROLLERTOUCHPADMOTION",

@@ -145,11 +145,6 @@ jobs:
             build-essential \
             cmake \
             git \
-            gcc-aarch64-linux-gnu \
-            bc \
-            bison \
-            flex \
-            kmod \
             libtool \
             libssl-dev \
             libjson-c-dev \
@@ -192,6 +187,14 @@ jobs:
             chiaki-ng/lib/src/controller.c chiaki-ng/lib/src/orientation.c \
             -lm -o "$RUNNER_TEMP/controller-features-test"
           "$RUNNER_TEMP/controller-features-test"
+
+      - name: Test controller rumble output policy
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/rumble_policy_test.c src/rumble_policy.c \
+            -o "$RUNNER_TEMP/rumble-policy-test"
+          "$RUNNER_TEMP/rumble-policy-test"
 
       - name: Test stream configuration and recovery policy
         shell: bash
@@ -253,30 +256,9 @@ jobs:
             packaging/root/install.sh \
             packaging/root/load.sh \
             packaging/root/boot-hook.sh \
-            packaging/root/uninstall.sh \
-            kernel/build-webos-armv7-module.sh
-          ! grep -F 'load.sh --rebind' packaging/root/boot-hook.sh
-          grep -F '"$STATE_DIR/load.sh" --rebind' packaging/root/install.sh
-          grep -F '%s --rebind-connected' src/root_feedback.c
-          grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
-          grep -F 'if [ "$patch_status" != 0 ]' packaging/root/load.sh
-          grep -F 'device_has_input_node' packaging/root/load.sh
-          grep -F 'armv7l:4.4.84-*.koli.*)' packaging/root/install.sh
-          grep -F 'if [ ! -s "$MODULE" ]' packaging/root/load.sh
-          grep -F 'hid_hw_start(hdev, HID_CONNECT_DEFAULT)' \
-            kernel/hid-playstation-compat/hid-playstation.c
-          ! grep -F 'HID_CONNECT_HIDRAW' \
-            kernel/hid-playstation-compat/hid-playstation.c
-
-      - name: Build webOS 4.4 DualSense kernel modules
-        shell: bash
-        run: |
-          bash kernel/build-webos-module.sh \
-            "$RUNNER_TEMP/linux-4.4-module" \
-            packaging/root/modules/aarch64/4.4.84/lg1212
-          bash kernel/build-webos-armv7-module.sh \
-            "$RUNNER_TEMP/linux-4.4-armv7-module" \
-            packaging/root/modules/armv7l/4.4.84/lm21u
+            packaging/root/uninstall.sh
+          grep -F 'Legacy compatibility state checked and cleaned' src/root_feedback.c
+          python3 tests/root_compat_policy_test.py
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -408,32 +390,12 @@ jobs:
           cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
           test -s "$packaged_root/lib/libSDL2-2.0.so.0"
           test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
-          test -s "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko"
-          test -s "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko"
           test -s "$packaged_root/root/install.sh"
           test -s "$packaged_root/root/load.sh"
           test -s "$packaged_root/root/boot-hook.sh"
           test -s "$packaged_root/root/uninstall.sh"
-          test -x "$packaged_root/root/chiaki-bt-patch"
-          "$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" -h \
-            "$packaged_root/root/chiaki-bt-patch" \
-            | grep -F 'Machine:' \
-            | grep -F 'ARM'
-          aarch64-linux-gnu-readelf -h \
-            "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko" \
-            | grep -F 'Machine:' \
-            | grep -F 'AArch64'
-          readelf -h \
-            "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko" \
-            | grep -F 'Class:' \
-            | grep -F 'ELF32'
-          readelf -h \
-            "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko" \
-            | grep -F 'Machine:' \
-            | grep -F 'ARM'
-          test "$(modinfo -F vermagic \
-            "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko")" = \
-            '4.4.84 SMP preempt mod_unload ARMv7 '
+          test ! -e "$packaged_root/root/modules"
+          test ! -e "$packaged_root/root/chiaki-bt-patch"
 
           packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
           if [[ -z "$packaged_binary" ]]; then

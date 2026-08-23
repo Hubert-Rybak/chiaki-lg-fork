@@ -13,7 +13,7 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
 | TV | webOS / firmware | Platform | Kernel | Verified paths |
 |---|---|---|---|---|
-| LG OLED G1 (`OLED65G13LA`) | webOS `6.5.3`, firmware `03.53.45` | `O20N_DVB_EU`, ARM64 `lge,lg1212` | `4.4.84-229.kcl4tv.6` | Development-IPK installation and launcher startup; rooted Bluetooth correction and compatibility-driver activation; Bluetooth DualSense enhanced-report decoding and standardized SDL input in the launcher |
+| LG OLED G1 (`OLED65G13LA`) | webOS `6.5.3`, firmware `03.53.45` | `O20N_DVB_EU`, ARM64 `lge,lg1212` | `4.4.84-229.kcl4tv.6` | Development-IPK installation and 1080p60 streaming. Bluetooth DualSense buttons, touchpad, and motion were verified with the now-withdrawn experimental compatibility stack; native-HID and long-duration stability retesting is pending. |
 
 The row above records the exact hardware used for regression checks on
 2026-08-23. Streaming and controller feedback still depend on the console,
@@ -31,7 +31,7 @@ include the TV model as well as the webOS and firmware versions.
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
 - **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads through SDL's standardized controller mapping
-- **Controller feedback** — rumble for supported pads, PS5 haptic-to-rumble feedback, and DualSense adaptive triggers, lightbar, and player LEDs
+- **Controller feedback** — rumble for supported pads and rate-limited PS5 haptic-to-rumble feedback; advanced Bluetooth writes are quarantined pending a safe in-process transport
 - **Magic Remote friendly** — d-pad navigation, pointer hover/click, number-pad IP entry, and Red as a Back/disconnect substitute
 - **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to import registration credentials and the matching manual-host IP
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
@@ -54,8 +54,8 @@ navigation, and package management. The comparison below refers to the original
 | Area | Original Chiaki-lg | This fork |
 |---|---|---|
 | PlayStation controls | Direct evdev mapping; button and axis aliases can vary by TV kernel | Bundled SDL GameController mappings with corrected Square/Triangle positions, analog L2/R2, sticks, and hotplug |
-| Controller feedback | Controller input only | Rumble for supported pads, PS5 haptic-to-rumble conversion, and DualSense adaptive triggers, lightbar, and player LEDs |
-| Older webOS DualSense support | No feedback path for TVs without LG's `hid-playstation` driver | Optional rooted compatibility driver and a signature-checked, memory-only correction for LG's Bluetooth output-report bug on supported ARM64 LG1212/O20 and ARMv7 LM21U/koli TVs |
+| Controller feedback | Controller input only | Rumble for supported pads and rate-limited PS5 haptic-to-rumble conversion |
+| Older webOS DualSense support | Direct evdev input | Automatic SDL HIDAPI routing for standardized buttons plus DualSense touch and motion when the TV exposes writable `hidraw`; unverified out-of-tree kernel modules are default-denied |
 | Streaming dependencies | Moving/unversioned dependency inputs | chiaki-ng 1.10.0 and SS4S are pinned to exact revisions; builds verify those inputs and reject modified dependency source trees |
 | Video callback contract | Loss/recovery metadata was treated as codec/keyframe metadata | Uses chiaki-ng's exact `frames_lost` / `frame_recovered` contract and detects real H.264/H.265 keyframes from NAL units |
 | Congestion and FEC recovery | Packet-loss reporting was implicitly clamped to zero; no configured FEC-to-IDR path | Reports up to 5% loss by default, enables IDR on FEC failure, and allows chiaki-ng to downgrade an unsupported profile |
@@ -70,11 +70,11 @@ navigation, and package management. The comparison below refers to the original
 | Installation identity | `org.homebrew.chiaki` | Release ID `org.homebrew.chiaki.fork` and development ID `org.homebrew.chiaki.fork.dev`, allowing all variants to coexist |
 | Development builds | No source revision in the installed identity | `DEV`-badged icon plus the exact commit hash in the launcher title, description, artifact name, and IPK filename |
 
-The rooted compatibility path is deliberately conservative. It does not edit
-LG firmware files, rejects unknown Bluetooth-library signatures and unsupported
-kernels, and can be removed with the bundled uninstaller. Root is not required
-for normal streaming, controller input, Magic Remote support, or TVs that
-already provide a suitable PlayStation driver.
+Root is not required for streaming, Magic Remote support, or controller features
+that the TV exposes to SDL. Earlier development IPKs automatically installed
+an out-of-tree PlayStation compatibility module. That path is now withdrawn:
+generic `4.4.84` vermagic and successful loading do not prove compatibility with
+LG's firmware-specific vendor kernel ABI.
 
 The core limitations remain the same: console registration is performed with
 desktop chiaki-ng, and actual codec/resolution support still depends on the
@@ -231,56 +231,21 @@ selection opened `/dev/hidraw0` and delivered working controller input. Pair the
 pad before launching the app; if it connects later, restart the app. Other
 controller backends remain unchanged.
 
-Rumble is sent through SDL's selected controller path. For PS5 sessions, the
-haptic audio stream is translated to the controller motors. A Bluetooth
-DualSense additionally receives adaptive-trigger effects, lightbar colour, and
-player-LED state through webOS's Bluetooth HID service.
+Rumble is sent only through SDL's selected controller path. For PS5 sessions,
+the haptic audio stream is translated to controller motors, quantized to the
+DualSense protocol's eight-bit amplitudes, and coalesced to at most 20 non-zero
+updates per second; a stop is immediate. The app logs controller firmware and
+battery/power state to make Bluetooth detach reports diagnosable.
 
-Newer TVs include LG's `hid-playstation` driver and work without setup. The IPK
-also bundles a minimal compatibility driver for rooted TVs using LG's 4.4.84
-kernel (webOS 5/6 generation): ARM64 LG1212/O20 and 32-bit ARMv7 LM21U/koli.
-Each module is built with the corresponding published LG kernel configuration;
-the LM21U build additionally uses LG's bundled GCC 8.2.0 toolchain. CI checks
-the ELF architecture and complete module vermagic before packaging. On first
-launch, the app asks Homebrew Channel's elevated
-service to install it under
-`/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
-`90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
-unchanged. On app launch only, a connected compatible pad is handed from
-`hid-generic` to `playstation` before SDL initializes. The boot hook never
-rebinds pads, and the app never rebinds one during an active input session. If a
-pad is first connected after the app has launched, restart the app once to get
-feedback; input remains available through `hid-generic` in the meantime.
-
-These older releases also contain an LG Bluetooth-stack bug that labels HID
-output as a feature report. The root component includes a small runtime helper
-that scans the running Bluetooth daemon for one exact instruction signature and
-changes only the report-type immediate from `3` to `2`. The correction is made
-in process memory: the firmware library on disk is never replaced or edited,
-ambiguous/unknown builds fail closed, app launch reapplies it after daemon
-restarts, and uninstall restores the live byte when applicable. The compatibility
-driver is not loaded and Bluetooth pads are not rebound unless that correction
-is confirmed active. Conversely, the correction and advanced userspace output
-are disabled when no ABI-matched module owns the controller, avoiding report-mode
-changes while the old `hid-generic` path still owns it. A failed driver probe or
-missing input node restores `hid-generic`, preserving basic controller input
-instead of leaving the pad unusable.
-
-The compatibility module is selected by CPU architecture, kernel release,
-device-tree platform, and module vermagic. It preserves the controller's
-descriptor-derived input mapping—the path verified on the LG OLED G1—while
-adding native `EV_FF` rumble and the initialization needed by Bluetooth
-trigger/light reports. The rumble mode follows Sony's firmware feature version
-when available and defaults to the current vibration-v2 protocol. Installation
-diagnostics are written to
-`/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
-`/tmp/chiaki-hid-playstation.log`.
-
-To remove the root component and return connected pads to `hid-generic`:
-
-```sh
-/var/lib/webosbrew/chiaki-dualsense/uninstall.sh
-```
+The IPK does not package or load the experimental `hid-playstation` modules and
+does not patch LG's Bluetooth daemon. Its root bootstrap exists only to remove
+the app-owned module payload, memory patch, and boot hook left by an older
+development IPK. It never unloads or rebinds a driver by name, so a reboot may
+be required to unload a legacy module; native LG drivers are not touched.
+Advanced adaptive-trigger/lightbar/
+player-LED output is also disabled because its previous implementation spawned
+`luna-send` after the GPU/video stack was active and interleaved another
+Bluetooth output format with SDL.
 
 The TV remote is not forwarded to the PS5 as controller input. During streaming it serves only:
 
@@ -340,24 +305,23 @@ Check `/tmp/chiaki.log` for the `[AUTO]` line confirming which SS4S module was s
 Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see above).
 
 **Controller input works but rumble/triggers/lightbar do not**
-Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. Newer TVs provide
-the kernel `hid-playstation` driver directly. Rooted ARM64 LG1212/O20 and ARMv7
-LM21U/koli TVs using LG's 4.4.84 kernel can install the matching bundled module
-automatically; other older platforms continue to work as input-only through
-`hid-generic`. Keep the
-controller connected while launching the app so the compatibility driver can
-claim it before SDL starts. If it is connected later, restart the app once. The
-app deliberately avoids rebinding or sending advanced feedback through the
-wrong driver during an active controller session.
+Check the `[INPUT]` and `[DUALSENSE]` lines in `/tmp/chiaki.log`. Basic rumble is
+available only when SDL reports rumble support. Adaptive triggers, custom
+lightbar colour, and player LEDs are intentionally unavailable in the current
+safety build; they require a transport that neither forks from the streaming
+process nor depends on an unverified kernel module.
+
+If `/tmp/chiaki.log` says a legacy Chiaki controller module may still be loaded,
+reboot the TV before testing. Root cleanup details are recorded in
+`/tmp/chiaki-hid-playstation-install.log`; a failed live-memory rollback retains
+its helper so the next launch can retry.
 
 **Controller is paired but the app detects no buttons**
 Set `log_level` to `"info"`, launch the app with the controller connected, and
 inspect the `[INPUT]` lines in `/tmp/chiaki.log`. They include SDL's device index,
 name, selected device path, GUID, vendor/product IDs, and mapping decision.
-For rooted compatibility installs, also inspect
-`/tmp/chiaki-hid-playstation-install.log` and
-`/tmp/chiaki-hid-playstation.log`. Do not publish a complete verbose Chiaki log
-or `config.json`, because authentication material may be present.
+Do not publish a complete verbose Chiaki log or `config.json`, because
+authentication material may be present.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
@@ -401,10 +365,9 @@ five-second stall, and sustained decoder latency also triggers a rebuild.
 
 Gamepad input uses the bundled webosbrew SDL GameController layer. SDL's
 standard A/B/X/Y and trigger axes are translated to `ChiakiControllerState`,
-with controller hotplug handled by the main event loop. Ordinary rumble uses
-SDL force feedback. DualSense trigger/light state is coalesced and sent
-from a rate-limited worker through the public webOS Bluetooth service, keeping
-process creation off the render loop.
+with controller hotplug handled by the main event loop. DualSense touch and
+motion use SDL's HIDAPI events. SDL is also the sole output writer, and
+DualSense rumble is rate-limited to protect older Bluetooth stacks.
 
 ### webOS version auto-detection
 
@@ -484,8 +447,10 @@ configuration separate from development builds.
 | `config_import.c` / `config_import.h` | chiaki-ng INI settings import |
 | `video.c` / `video.h` | Video callback → SS4S/NDL feed, NAL classification, stats counters |
 | `audio.c` / `audio.h` | Audio callback → SS4S/NDL Opus feed |
-| `input.c` / `input.h` | SDL gamepad mapping, hotplug, rumble, and PS5 haptics |
-| `dualsense.c` / `dualsense.h` | Rate-limited DualSense Bluetooth HID feedback |
+| `input.c` / `input.h` | SDL gamepad mapping, hotplug, motion/touch dispatch, rumble, and PS5 haptics |
+| `controller_features.c` / `controller_features.h` | DualSense touch coordinates, motion state, and orientation tracking |
+| `rumble_policy.c` / `rumble_policy.h` | Tested DualSense rumble quantization and output-rate policy |
+| `dualsense.c` / `dualsense.h` | Quarantined experimental advanced-feedback transport; not constructed at runtime |
 | `ui.c` / `ui.h` | Launcher UI, settings screen, loading screen, stats overlay renderer |
 | `stats.c` / `stats.h` | Thread-safe stream statistics and overlay state |
 | `stream_health.c` / `stream_health.h` | Deterministic IDR, stall, latency, and reconnect-backoff policy |
