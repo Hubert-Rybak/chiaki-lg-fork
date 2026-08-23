@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -7,6 +8,15 @@ boot = Path("packaging/root/boot-hook.sh").read_text(encoding="utf-8")
 uninstall = Path("packaging/root/uninstall.sh").read_text(encoding="utf-8")
 workflow = Path(".github/workflows/build-ipk.yml").read_text(encoding="utf-8")
 all_root_scripts = "\n".join((install, load, boot, uninstall))
+
+for line in all_root_scripts.splitlines():
+    command = line.strip()
+    if not command or command.startswith("#"):
+        continue
+    if re.search(r"\b(?:insmod|modprobe|rmmod)\b", command):
+        raise SystemExit(f"Root script can activate or remove a module: {command}")
+    if re.search(r"/sys/bus/hid/drivers/[^ ]+/(?:bind|unbind)\b", command):
+        raise SystemExit(f"Root script can rebind a HID device: {command}")
 
 for unsafe_selector in (
     "aarch64:4.4.84*",
