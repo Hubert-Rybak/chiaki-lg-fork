@@ -15,6 +15,8 @@
 #define CHORD_WINDOW_MS 100u
 #define HAPTIC_HOLD_MS   50u
 #define HAPTIC_RUMBLE_MIN_STRENGTH 100u
+/* DualSense Bluetooth advertises 1 kHz sensors; Chiaki needs at most 125 Hz. */
+#define MOTION_SEND_INTERVAL_MS 8u
 
 typedef enum {
     CHORD_NONE = 0,
@@ -38,6 +40,8 @@ struct InputContext {
     bool accel_event_logged;
     bool gyro_event_logged;
     bool motion_reset_pending;
+    bool motion_dirty;
+    uint64_t last_motion_send_ms;
 
     bool back_held;
     bool start_held;
@@ -75,6 +79,8 @@ static void reset_controller_state_locked(InputContext *ctx)
     ctx->chord_active = false;
     ctx->chord_pending = CHORD_NONE;
     ctx->motion_reset_pending = false;
+    ctx->motion_dirty = false;
+    ctx->last_motion_send_ms = 0;
 }
 
 static uint64_t monotonic_ms(void)
@@ -511,6 +517,8 @@ static void handle_controller_sensor(
     bool changed = controller_features_handle_sensor(
         &ctx->features, &ctx->state, sensor,
         event->data[0], event->data[1], event->data[2], timestamp_us);
+    if (changed)
+        ctx->motion_dirty = true;
     bool first_event = false;
     if (changed && sensor == CONTROLLER_SENSOR_ACCEL &&
         !ctx->accel_event_logged) {
@@ -530,7 +538,6 @@ static void handle_controller_sensor(
                        sensor == CONTROLLER_SENSOR_ACCEL
                            ? "accelerometer" : "gyroscope");
     }
-    send_state(ctx);
 }
 #endif
 
@@ -820,6 +827,7 @@ void input_pump(InputContext *ctx)
     if (!ctx) return;
 
     bool chord_changed = false;
+    uint64_t now = monotonic_ms();
     pthread_mutex_lock(&ctx->mutex);
     if (ctx->chord_pending != CHORD_NONE &&
         (uint32_t)(SDL_GetTicks() - ctx->chord_started_ms) >= CHORD_WINDOW_MS) {
@@ -835,9 +843,18 @@ void input_pump(InputContext *ctx)
     if (motion_reset) {
         ctx->motion_reset_pending = false;
         controller_features_reset_motion(&ctx->features, &ctx->state);
+        ctx->motion_dirty = false;
+        ctx->last_motion_send_ms = now;
     }
 
-    uint64_t now = monotonic_ms();
+    bool motion_changed = !motion_reset && ctx->motion_dirty &&
+        (ctx->last_motion_send_ms == 0 ||
+         now - ctx->last_motion_send_ms >= MOTION_SEND_INTERVAL_MS);
+    if (motion_changed) {
+        ctx->motion_dirty = false;
+        ctx->last_motion_send_ms = now;
+    }
+
     float base_multiplier = ctx->is_dualsense ? 1.0f : ctx->rumble_multiplier;
     uint16_t left = scale_rumble((uint8_t)ctx->base_rumble_left, base_multiplier);
     uint16_t right = scale_rumble((uint8_t)ctx->base_rumble_right, base_multiplier);
@@ -865,7 +882,7 @@ void input_pump(InputContext *ctx)
     if (motion_reset) {
         app_log_always("[INPUT] Motion controls recalibrated\n");
         send_state(ctx);
-    } else if (chord_changed) {
+    } else if (chord_changed || motion_changed) {
         send_state(ctx);
     }
     if (!ctx->controller) return;
