@@ -222,20 +222,16 @@ close a working controller. Hotplug can take up to three seconds to appear;
 restart the app if a very fast disconnect/reconnect reuses the same event
 index between polls.
 
-On webOS, Bluetooth DualSense and DualSense Edge devices are excluded from
-SDL's HIDAPI backend and routed through their kernel `/dev/input/event*` node.
-The TV app jail can enumerate `/dev/hidraw*` but does not reliably deliver
-Bluetooth input reports there. The active DualSense event handler is read from
-`/proc/bus/input/devices` and passed explicitly to SDL before initialization,
-which also covers event indices above 31. SDL's PS5 HIDAPI driver yields to
-evdev only when that active event handler is present. If the rooted bootstrap
-has only just created the event node, the app reinitializes SDL's unopened
-controller subsystem for up to two seconds until the app-jail node is usable;
-this avoids requiring a second launch. Pair the pad before launching the app;
-if it connects later, restart the app. Global HIDAPI and all non-PlayStation
+Controller backend selection remains automatic. In particular, Bluetooth
+DualSense and DualSense Edge devices stay on SDL's PS5 HIDAPI path when it is
+available; the app does not disable HIDAPI or pin the controller to a particular
+`/dev/input/event*` node. On the tested webOS 6.5.3 TV, forcing evdev made SDL
+enumerate and open the pad without delivering menu events, while automatic
+selection opened `/dev/hidraw0` and delivered working controller input. Pair the
+pad before launching the app; if it connects later, restart the app. Other
 controller backends remain unchanged.
 
-Rumble is sent through SDL's evdev force-feedback path. For PS5 sessions, the
+Rumble is sent through SDL's selected controller path. For PS5 sessions, the
 haptic audio stream is translated to the controller motors. A Bluetooth
 DualSense additionally receives adaptive-trigger effects, lightbar colour, and
 player-LED state through webOS's Bluetooth HID service.
@@ -357,7 +353,7 @@ wrong driver during an active controller session.
 **Controller is paired but the app detects no buttons**
 Set `log_level` to `"info"`, launch the app with the controller connected, and
 inspect the `[INPUT]` lines in `/tmp/chiaki.log`. They include SDL's device index,
-name, `/dev/input/event*` path, GUID, vendor/product IDs, and mapping decision.
+name, selected device path, GUID, vendor/product IDs, and mapping decision.
 For rooted compatibility installs, also inspect
 `/tmp/chiaki-hid-playstation-install.log` and
 `/tmp/chiaki-hid-playstation.log`. Do not publish a complete verbose Chiaki log
@@ -406,7 +402,7 @@ five-second stall, and sustained decoder latency also triggers a rebuild.
 Gamepad input uses the bundled webosbrew SDL GameController layer. SDL's
 standard A/B/X/Y and trigger axes are translated to `ChiakiControllerState`,
 with controller hotplug handled by the main event loop. Ordinary rumble uses
-SDL/evdev force feedback. DualSense trigger/light state is coalesced and sent
+SDL force feedback. DualSense trigger/light state is coalesced and sent
 from a rate-limited worker through the public webOS Bluetooth service, keeping
 process creation off the render loop.
 
