@@ -308,7 +308,6 @@ static bool open_controller(InputContext *ctx, int device_index)
 #endif
 
     pthread_mutex_lock(&ctx->mutex);
-    reset_controller_state_locked(ctx);
     ctx->is_dualsense = is_dualsense;
     ctx->dualsense_feedback = feedback;
     ctx->accel_sensor_enabled = accel_enabled;
