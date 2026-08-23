@@ -248,24 +248,30 @@ jobs:
             packaging/root/install.sh \
             packaging/root/load.sh \
             packaging/root/boot-hook.sh \
-            packaging/root/uninstall.sh
+            packaging/root/uninstall.sh \
+            kernel/build-webos-armv7-module.sh
           ! grep -F 'load.sh --rebind' packaging/root/boot-hook.sh
           grep -F '"$STATE_DIR/load.sh" --rebind' packaging/root/install.sh
           grep -F '%s --rebind-connected' src/root_feedback.c
           grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
           grep -F 'if [ "$patch_status" != 0 ]' packaging/root/load.sh
           grep -F 'device_has_input_node' packaging/root/load.sh
+          grep -F 'armv7l:4.4.84-*.koli.*)' packaging/root/install.sh
+          grep -F 'if [ ! -s "$MODULE" ]' packaging/root/load.sh
           grep -F 'HID_CONNECT_HIDRAW' \
             kernel/hid-playstation-compat/hid-playstation.c
           grep -F '.raw_event = dualsense_raw_event' \
             kernel/hid-playstation-compat/hid-playstation.c
 
-      - name: Build webOS 4.4 DualSense kernel module
+      - name: Build webOS 4.4 DualSense kernel modules
         shell: bash
         run: |
           bash kernel/build-webos-module.sh \
             "$RUNNER_TEMP/linux-4.4-module" \
             packaging/root/modules/aarch64/4.4.84/lg1212
+          bash kernel/build-webos-armv7-module.sh \
+            "$RUNNER_TEMP/linux-4.4-armv7-module" \
+            packaging/root/modules/armv7l/4.4.84/lm21u
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -398,6 +404,7 @@ jobs:
           test -s "$packaged_root/lib/libSDL2-2.0.so.0"
           test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
           test -s "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko"
+          test -s "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko"
           test -s "$packaged_root/root/install.sh"
           test -s "$packaged_root/root/load.sh"
           test -s "$packaged_root/root/boot-hook.sh"
@@ -411,6 +418,17 @@ jobs:
             "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko" \
             | grep -F 'Machine:' \
             | grep -F 'AArch64'
+          readelf -h \
+            "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko" \
+            | grep -F 'Class:' \
+            | grep -F 'ELF32'
+          readelf -h \
+            "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko" \
+            | grep -F 'Machine:' \
+            | grep -F 'ARM'
+          test "$(modinfo -F vermagic \
+            "$packaged_root/root/modules/armv7l/4.4.84/lm21u/hid-playstation.ko")" = \
+            '4.4.84 SMP preempt mod_unload ARMv7 '
 
           packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
           if [[ -z "$packaged_binary" ]]; then

@@ -55,7 +55,7 @@ navigation, and package management. The comparison below refers to the original
 |---|---|---|
 | PlayStation controls | Direct evdev mapping; button and axis aliases can vary by TV kernel | Bundled SDL GameController mappings with corrected Square/Triangle positions, analog L2/R2, sticks, and hotplug |
 | Controller feedback | Controller input only | Rumble for supported pads, PS5 haptic-to-rumble conversion, and DualSense adaptive triggers, lightbar, and player LEDs |
-| Older webOS DualSense support | No feedback path for TVs without LG's `hid-playstation` driver | Optional rooted compatibility driver and a signature-checked, memory-only correction for LG's Bluetooth output-report bug on supported LG1212/O20 TVs |
+| Older webOS DualSense support | No feedback path for TVs without LG's `hid-playstation` driver | Optional rooted compatibility driver and a signature-checked, memory-only correction for LG's Bluetooth output-report bug on supported ARM64 LG1212/O20 and ARMv7 LM21U/koli TVs |
 | Streaming dependencies | Moving/unversioned dependency inputs | chiaki-ng 1.10.0 and SS4S are pinned to exact revisions; builds verify those inputs and reject modified dependency source trees |
 | Video callback contract | Loss/recovery metadata was treated as codec/keyframe metadata | Uses chiaki-ng's exact `frames_lost` / `frame_recovered` contract and detects real H.264/H.265 keyframes from NAL units |
 | Congestion and FEC recovery | Packet-loss reporting was implicitly clamped to zero; no configured FEC-to-IDR path | Reports up to 5% loss by default, enables IDR on FEC failure, and allows chiaki-ng to downgrade an unsupported profile |
@@ -241,10 +241,12 @@ DualSense additionally receives adaptive-trigger effects, lightbar colour, and
 player-LED state through webOS's Bluetooth HID service.
 
 Newer TVs include LG's `hid-playstation` driver and work without setup. The IPK
-also bundles a minimal compatibility driver for rooted ARM64 LG1212/O20 TVs
-using LG's 4.4.84 kernel (webOS 5/6 generation). It is built against LG's
-published `lg1k` kernel source and configuration so its in-kernel structure ABI
-matches these TVs. On first launch, the app asks Homebrew Channel's elevated
+also bundles a minimal compatibility driver for rooted TVs using LG's 4.4.84
+kernel (webOS 5/6 generation): ARM64 LG1212/O20 and 32-bit ARMv7 LM21U/koli.
+Each module is built with the corresponding published LG kernel configuration;
+the LM21U build additionally uses LG's bundled GCC 8.2.0 toolchain. CI checks
+the ELF architecture and complete module vermagic before packaging. On first
+launch, the app asks Homebrew Channel's elevated
 service to install it under
 `/var/lib/webosbrew/chiaki-dualsense` and adds the reversible
 `90-chiaki-dualsense` boot hook. Unsupported kernels and non-rooted TVs are left
@@ -262,9 +264,11 @@ in process memory: the firmware library on disk is never replaced or edited,
 ambiguous/unknown builds fail closed, app launch reapplies it after daemon
 restarts, and uninstall restores the live byte when applicable. The compatibility
 driver is not loaded and Bluetooth pads are not rebound unless that correction
-is confirmed active. A failed driver probe or missing input node restores
-`hid-generic`, preserving basic controller input instead of leaving the pad
-unusable.
+is confirmed active. Conversely, the correction and advanced userspace output
+are disabled when no ABI-matched module owns the controller, because enhanced
+Bluetooth input cannot be decoded reliably by the old `hid-generic` path. A
+failed driver probe or missing input node restores `hid-generic`, preserving
+basic controller input instead of leaving the pad unusable.
 
 The compatibility module is selected by CPU architecture, kernel release,
 device-tree platform, and module vermagic. It backports Sony's standardized
@@ -343,9 +347,10 @@ Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see ab
 
 **Controller input works but rumble/triggers/lightbar do not**
 Check `/tmp/chiaki.log` for the `[DUALSENSE]` driver message. Newer TVs provide
-the kernel `hid-playstation` driver directly. Rooted LG1212/O20 TVs using LG's
-4.4.84 kernel can install the bundled compatibility module automatically; other
-older platforms continue to work as input-only through `hid-generic`. Keep the
+the kernel `hid-playstation` driver directly. Rooted ARM64 LG1212/O20 and ARMv7
+LM21U/koli TVs using LG's 4.4.84 kernel can install the matching bundled module
+automatically; other older platforms continue to work as input-only through
+`hid-generic`. Keep the
 controller connected while launching the app so the compatibility driver can
 claim it before SDL starts. If it is connected later, restart the app once. The
 app deliberately avoids rebinding or sending advanced feedback through the

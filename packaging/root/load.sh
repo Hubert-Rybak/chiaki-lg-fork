@@ -25,6 +25,15 @@ if [ "$(id -u)" != 0 ]; then
     exit 77
 fi
 
+# The runtime correction is safe only as one half of the compatibility path.
+# Without the matching parser module, advanced output switches a Bluetooth
+# DualSense to reports that the old hid-generic path cannot decode.
+if [ ! -s "$MODULE" ]; then
+    rm -f "$PATCH_MARKER"
+    echo "No ABI-matched compatibility module; Bluetooth correction left disabled."
+    exit 77
+fi
+
 is_dualsense_device() {
     grep -Eq '^HID_ID=....:0000054C:00000(CE6|DF2)$' "$1/uevent"
 }
@@ -123,15 +132,12 @@ if [ "$patch_status" != 0 ]; then
     esac
 fi
 
-module_available=false
-if [ -s "$MODULE" ]; then
-    module_available=true
-    if [ -d /sys/bus/hid/drivers/playstation ]; then
-        echo "playstation HID driver is already registered."
-    else
-        insmod "$MODULE"
-        echo "Loaded $MODULE"
-    fi
+module_available=true
+if [ -d /sys/bus/hid/drivers/playstation ]; then
+    echo "playstation HID driver is already registered."
+else
+    insmod "$MODULE"
+    echo "Loaded $MODULE"
 fi
 
 if [ "$REBIND" = true ] && [ "$module_available" = true ]; then

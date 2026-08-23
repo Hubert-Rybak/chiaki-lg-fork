@@ -31,8 +31,6 @@
 #define LUNA_SEND_PUB "/usr/bin/luna-send-pub"
 #define SEND_DATA_URI \
     "luna://com.webos.service.bluetooth2/hid/internal/sendData"
-#define ROOT_PATCH_MARKER "/tmp/chiaki-bluetooth-output-patched"
-
 #define COMMON_OFFSET             3
 #define FLAG0_RIGHT_TRIGGER       0x04
 #define FLAG0_LEFT_TRIGGER        0x08
@@ -441,23 +439,6 @@ static bool dualsense_hid_playstation_registered(void)
     return access("/sys/bus/hid/drivers/playstation", F_OK) == 0;
 }
 
-static bool dualsense_root_transport_patched(void)
-{
-    FILE *marker = fopen(ROOT_PATCH_MARKER, "r");
-    if (!marker)
-        return false;
-
-    long pid = 0;
-    bool valid = fscanf(marker, "%ld", &pid) == 1 && pid > 0;
-    fclose(marker);
-    if (!valid)
-        return false;
-
-    char maps[64];
-    int n = snprintf(maps, sizeof(maps), "/proc/%ld/maps", pid);
-    return n > 0 && (size_t)n < sizeof(maps) && access(maps, R_OK) == 0;
-}
-
 static bool luna_send_report(const char *address,
                              const uint8_t report[DUALSENSE_REPORT_LEN])
 {
@@ -598,15 +579,15 @@ DualSenseFeedback *dualsense_feedback_new(void)
         return NULL;
     }
     bool driver_bound = dualsense_hid_playstation_bound();
-    if (dualsense_hid_playstation_registered() && !driver_bound) {
-        app_log_always("[DUALSENSE] playstation driver is registered but does "
-                       "not own this controller; advanced feedback disabled "
-                       "to preserve the Bluetooth connection\n");
-        return NULL;
-    }
-    if (!driver_bound && !dualsense_root_transport_patched()) {
-        app_log_always("[DUALSENSE] No native driver or rooted Bluetooth "
-                       "transport correction; advanced feedback disabled\n");
+    if (!driver_bound) {
+        if (dualsense_hid_playstation_registered())
+            app_log_always("[DUALSENSE] playstation driver is registered but "
+                           "does not own this controller; advanced feedback "
+                           "disabled to preserve the Bluetooth connection\n");
+        else
+            app_log_always("[DUALSENSE] No PlayStation input driver owns this "
+                           "controller; advanced feedback disabled to preserve "
+                           "hid-generic input\n");
         return NULL;
     }
 
