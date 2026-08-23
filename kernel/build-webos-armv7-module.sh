@@ -51,12 +51,14 @@ set +u
 source "$TOOLCHAIN_ENV"
 set -u
 
-test "$(arm-starfish-linux-gnueabi-gcc -dumpfullversion)" = "8.2.0"
+LG_CROSS_COMPILE="${CROSS_COMPILE:?LG SDK did not define CROSS_COMPILE}"
+test "$LG_CROSS_COMPILE" = "arm-starfishmllib32-linux-gnueabi-"
+test "$("${LG_CROSS_COMPILE}gcc" -dumpfullversion)" = "8.2.0"
 
 make -C "$KERNEL_DIR" \
     HOSTCFLAGS=-fcommon \
     ARCH=arm \
-    CROSS_COMPILE=arm-starfish-linux-gnueabi- \
+    CROSS_COMPILE="$LG_CROSS_COMPILE" \
     lm21u_dtb_mma_seeTV_defconfig
 
 grep -qx 'CONFIG_MSTAR_MT5889=y' "$KERNEL_DIR/.config"
@@ -73,12 +75,12 @@ fi
 make -C "$KERNEL_DIR" \
     HOSTCFLAGS=-fcommon \
     ARCH=arm \
-    CROSS_COMPILE=arm-starfish-linux-gnueabi- \
+    CROSS_COMPILE="$LG_CROSS_COMPILE" \
     modules_prepare
 make -C "$KERNEL_DIR" \
     HOSTCFLAGS=-fcommon \
     ARCH=arm \
-    CROSS_COMPILE=arm-starfish-linux-gnueabi- \
+    CROSS_COMPILE="$LG_CROSS_COMPILE" \
     KBUILD_MODPOST_WARN=1 \
     M="$SCRIPT_DIR/hid-playstation-compat" \
     clean modules
@@ -87,10 +89,10 @@ module="$SCRIPT_DIR/hid-playstation-compat/hid-playstation.ko"
 test -s "$module"
 cp "$module" "$OUTPUT_DIR/hid-playstation.ko"
 
-arm-starfish-linux-gnueabi-readelf -h "$OUTPUT_DIR/hid-playstation.ko" \
+"${LG_CROSS_COMPILE}readelf" -h "$OUTPUT_DIR/hid-playstation.ko" \
     | grep -F 'Class:' \
     | grep -F 'ELF32'
-arm-starfish-linux-gnueabi-readelf -h "$OUTPUT_DIR/hid-playstation.ko" \
+"${LG_CROSS_COMPILE}readelf" -h "$OUTPUT_DIR/hid-playstation.ko" \
     | grep -F 'Machine:' \
     | grep -F 'ARM'
 test "$(modinfo -F vermagic "$OUTPUT_DIR/hid-playstation.ko")" = \
