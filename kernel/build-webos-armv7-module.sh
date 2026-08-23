@@ -46,13 +46,21 @@ if [[ ! -f "$TOOLCHAIN_ENV" ]]; then
 fi
 
 # The official SDK environment supplies the relocated native tools, sysroot,
-# and exact GCC 8.2.0 cross compiler used by LG's published LM21U modules.
-set +u
+# and exact GCC 8.2.0 cross compiler used by LG's published LM21U modules. Its
+# generated setup file can return a non-zero status when an optional setup hook
+# is absent, so validate the required exports and executables explicitly below.
+set +eu
 source "$TOOLCHAIN_ENV"
-set -u
+toolchain_env_status=$?
+set -eu
+if [[ "$toolchain_env_status" -ne 0 ]]; then
+    echo "LG SDK environment returned $toolchain_env_status; validating required exports"
+fi
 
 LG_CROSS_COMPILE="${CROSS_COMPILE:?LG SDK did not define CROSS_COMPILE}"
 test "$LG_CROSS_COMPILE" = "arm-starfishmllib32-linux-gnueabi-"
+command -v "${LG_CROSS_COMPILE}gcc"
+command -v "${LG_CROSS_COMPILE}readelf"
 test "$("${LG_CROSS_COMPILE}gcc" -dumpfullversion)" = "8.2.0"
 
 make -C "$KERNEL_DIR" \
