@@ -6,6 +6,7 @@ input_source = Path("src/input.c").read_text(encoding="utf-8")
 
 init_position = source.find("SDL_Init(")
 background_hint_position = source.find("SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS")
+ps5_rumble_hint_position = source.find("SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE")
 input_init_position = source.find("input_init()")
 
 if init_position < 0:
@@ -14,6 +15,10 @@ if input_init_position < init_position:
     raise SystemExit("input_init must run after SDL_Init")
 if background_hint_position < 0 or background_hint_position > init_position:
     raise SystemExit("Background controller events must be enabled before SDL_Init")
+if ps5_rumble_hint_position < 0 or ps5_rumble_hint_position > init_position:
+    raise SystemExit(
+        "DualSense enhanced mode must be requested before SDL_Init"
+    )
 
 # Hardware A/B testing on webOS 6.5.3 showed that SDL's automatic PS5 HIDAPI
 # route delivers launcher input. Forcing the same Bluetooth pad to eventN made
@@ -21,12 +26,14 @@ if background_hint_position < 0 or background_hint_position > init_position:
 for forced_route in (
     "SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES",
     "SDL_HINT_JOYSTICK_DEVICE",
-    "SDL_HINT_JOYSTICK_HIDAPI_PS5",
     "SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER)",
     "sdl_recover_joystick_path",
 ):
     if forced_route in source:
         raise SystemExit(f"Forced DualSense routing must stay disabled: {forced_route}")
+
+if "SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5," in source:
+    raise SystemExit("The DualSense HIDAPI backend must remain automatically selected")
 
 if 'SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0")' in source:
     raise SystemExit("SDL HIDAPI must remain enabled")
@@ -38,7 +45,12 @@ if "dualsense_feedback_new(" in input_source:
 
 for safe_output_wiring in (
     "rumble_policy_prepare",
+    "SDL_GameControllerHasRumble",
     "SDL_JoystickCurrentPowerLevel",
+    "First PS5 haptics frame",
+    "First non-zero PS5 haptics frame",
+    "First non-zero Remote Play rumble event",
+    "First SDL rumble write",
     "SDL is the sole controller-output path",
 ):
     if safe_output_wiring not in input_source:

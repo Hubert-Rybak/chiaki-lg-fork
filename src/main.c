@@ -1287,6 +1287,15 @@ int main(int argc, char *argv[])
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_GUIDE", "true");
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    /*
+     * A Bluetooth DualSense powers up in SDL's simple-report mode unless the
+     * PS5 HIDAPI rumble hint is enabled before SDL initializes.  Simple mode
+     * exposes buttons and axes, but no rumble, touchpad, or motion sensors.
+     * This keeps SDL's automatic backend selection while opting into the
+     * controller's native enhanced reports and sole-writer output path.
+     */
+    if (SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1") != SDL_TRUE)
+        app_log_always("[INPUT] Could not enable SDL DualSense enhanced mode\n");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());

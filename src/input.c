@@ -60,6 +60,12 @@ struct InputContext {
     uint64_t haptic_until_ms;
     RumblePolicy rumble_policy;
     bool rumble_error_logged;
+    bool rumble_write_logged;
+    bool session_rumble_nonzero_logged;
+    bool haptic_frame_logged;
+    bool haptic_nonzero_logged;
+    uint64_t session_rumble_events;
+    uint64_t haptic_frames;
     uint64_t last_power_poll_ms;
 
     float rumble_multiplier;
@@ -251,6 +257,8 @@ static void close_controller(InputContext *ctx)
     ctx->accel_event_logged = false;
     ctx->gyro_event_logged = false;
     rumble_policy_reset(&ctx->rumble_policy);
+    ctx->rumble_error_logged = false;
+    ctx->rumble_write_logged = false;
     ctx->last_power_poll_ms = 0;
     DualSenseFeedback *feedback = ctx->dualsense_feedback;
     ctx->dualsense_feedback = NULL;
@@ -345,6 +353,8 @@ static bool open_controller(InputContext *ctx, int device_index)
     ctx->accel_event_logged = false;
     ctx->gyro_event_logged = false;
     rumble_policy_reset(&ctx->rumble_policy);
+    ctx->rumble_error_logged = false;
+    ctx->rumble_write_logged = false;
     ctx->last_power_poll_ms = 0;
     int combined_intensity =
         (ctx->trigger_intensity < 0 ? 0xf0 : ctx->trigger_intensity) |
@@ -364,12 +374,13 @@ static bool open_controller(InputContext *ctx, int device_index)
                    is_dualsense ? "yes" : "no");
     app_log_always(
         "[INPUT] Controller features: touchpads=%d fingers=%d "
-        "accel=%s/%s gyro=%s/%s firmware=0x%04x power=%s\n",
+        "accel=%s/%s gyro=%s/%s rumble=%s firmware=0x%04x power=%s\n",
         touchpad_count, touch_finger_count,
         has_accel ? "available" : "unavailable",
         accel_enabled ? "enabled" : "disabled",
         has_gyro ? "available" : "unavailable",
         gyro_enabled ? "enabled" : "disabled",
+        SDL_GameControllerHasRumble(controller) == SDL_TRUE ? "available" : "unavailable",
 #if SDL_VERSION_ATLEAST(2, 24, 0)
         (unsigned)SDL_GameControllerGetFirmwareVersion(controller),
 #else
@@ -645,9 +656,20 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
 {
     if (!ctx) return;
     pthread_mutex_lock(&ctx->mutex);
+    bool detached_session = ctx->session != NULL && session == NULL;
+    uint64_t rumble_events = ctx->session_rumble_events;
+    uint64_t haptic_frames = ctx->haptic_frames;
     ctx->session = session;
     /* UI controller events must never leak held buttons into a new stream. */
     reset_controller_state_locked(ctx);
+    if (session) {
+        ctx->session_rumble_nonzero_logged = false;
+        ctx->haptic_frame_logged = false;
+        ctx->haptic_nonzero_logged = false;
+        ctx->rumble_write_logged = false;
+        ctx->session_rumble_events = 0;
+        ctx->haptic_frames = 0;
+    }
     if (!session) {
         ctx->base_rumble_left = 0;
         ctx->base_rumble_right = 0;
@@ -660,6 +682,11 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
     pthread_mutex_unlock(&ctx->mutex);
 
     if (!session) {
+        if (detached_session)
+            app_log_always("[INPUT] Feedback summary: rumble_events=%llu "
+                           "haptic_frames=%llu\n",
+                           (unsigned long long)rumble_events,
+                           (unsigned long long)haptic_frames);
         if (ctx->controller)
             SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
         dualsense_feedback_release(feedback);
@@ -726,12 +753,23 @@ void input_handle_session_event(InputContext *ctx, const ChiakiEvent *event)
 {
     if (!ctx || !event) return;
 
+    bool log_rumble = false;
+    unsigned rumble_left = 0;
+    unsigned rumble_right = 0;
     pthread_mutex_lock(&ctx->mutex);
     DualSenseFeedback *feedback = ctx->dualsense_feedback;
     switch (event->type) {
     case CHIAKI_EVENT_RUMBLE: {
         ctx->base_rumble_left = event->rumble.left;
         ctx->base_rumble_right = event->rumble.right;
+        ++ctx->session_rumble_events;
+        if ((event->rumble.left || event->rumble.right) &&
+            !ctx->session_rumble_nonzero_logged) {
+            ctx->session_rumble_nonzero_logged = true;
+            log_rumble = true;
+            rumble_left = event->rumble.left;
+            rumble_right = event->rumble.right;
+        }
         break;
     }
     case CHIAKI_EVENT_LED_COLOR:
@@ -816,6 +854,10 @@ void input_handle_session_event(InputContext *ctx, const ChiakiEvent *event)
         break;
     }
     pthread_mutex_unlock(&ctx->mutex);
+    if (log_rumble)
+        app_log_always("[INPUT] First non-zero Remote Play rumble event: "
+                       "left=%u right=%u\n",
+                       rumble_left, rumble_right);
 }
 
 static void haptics_header_cb(ChiakiAudioHeader *header, void *user)
@@ -847,6 +889,9 @@ static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
     if (right > UINT16_MAX) right = UINT16_MAX;
 
     pthread_mutex_lock(&ctx->mutex);
+    ++ctx->haptic_frames;
+    bool log_haptic_frame = !ctx->haptic_frame_logged;
+    ctx->haptic_frame_logged = true;
     if (!ctx->haptics_enabled) {
         left = right = 0;
     } else {
@@ -858,7 +903,20 @@ static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
     ctx->haptic_rumble_left = (uint16_t)left;
     ctx->haptic_rumble_right = (uint16_t)right;
     ctx->haptic_until_ms = (left || right) ? monotonic_ms() + HAPTIC_HOLD_MS : 0;
+    bool log_nonzero_haptic = (left || right) && !ctx->haptic_nonzero_logged;
+    if (log_nonzero_haptic)
+        ctx->haptic_nonzero_logged = true;
     pthread_mutex_unlock(&ctx->mutex);
+    if (log_haptic_frame)
+        app_log_always("[INPUT] First PS5 haptics frame: bytes=%llu frames=%llu "
+                       "motor_left=%u motor_right=%u\n",
+                       (unsigned long long)buf_size,
+                       (unsigned long long)frames,
+                       (unsigned)left, (unsigned)right);
+    if (log_nonzero_haptic && !log_haptic_frame)
+        app_log_always("[INPUT] First non-zero PS5 haptics frame: "
+                       "motor_left=%u motor_right=%u\n",
+                       (unsigned)left, (unsigned)right);
 }
 
 ChiakiAudioSink input_make_haptics_sink(InputContext *ctx)
@@ -922,6 +980,10 @@ void input_pump(InputContext *ctx)
     bool is_dualsense = ctx->is_dualsense;
     bool rumble_due = rumble_policy_prepare(
         &ctx->rumble_policy, is_dualsense, now, left, right, &left, &right);
+    bool log_rumble_write = rumble_due && (left || right) &&
+                            !ctx->rumble_write_logged;
+    if (log_rumble_write)
+        ctx->rumble_write_logged = true;
     bool led_pending = ctx->led_pending;
     uint8_t led[3]; memcpy(led, ctx->led, sizeof(led));
     ctx->led_pending = false;
@@ -949,9 +1011,22 @@ void input_pump(InputContext *ctx)
 
     if (rumble_due) {
         Uint32 duration = (left || right) ? 5000u : 0u;
-        if (SDL_GameControllerRumble(ctx->controller, left, right, duration) != 0) {
+        int result = SDL_GameControllerRumble(
+            ctx->controller, left, right, duration);
+        pthread_mutex_lock(&ctx->mutex);
+        rumble_policy_report_result(&ctx->rumble_policy, result == 0);
+        pthread_mutex_unlock(&ctx->mutex);
+        if (log_rumble_write)
+            app_log_always("[INPUT] First SDL rumble write: left=%u right=%u "
+                           "duration_ms=%u result=%d%s%s\n",
+                           (unsigned)left, (unsigned)right,
+                           (unsigned)duration, result,
+                           result == 0 ? "" : " error=",
+                           result == 0 ? "" : SDL_GetError());
+        if (result != 0) {
             if (!ctx->rumble_error_logged) {
-                app_log("[INPUT] Controller rumble unavailable: %s\n", SDL_GetError());
+                app_log_always("[INPUT] Controller rumble unavailable: %s\n",
+                               SDL_GetError());
                 ctx->rumble_error_logged = true;
             }
         } else {

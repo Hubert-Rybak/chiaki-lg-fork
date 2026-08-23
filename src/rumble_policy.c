@@ -11,6 +11,7 @@ void rumble_policy_reset(RumblePolicy *policy)
     policy->last_right = 0;
     policy->last_send_ms = 0;
     policy->valid = false;
+    policy->last_send_failed = false;
 }
 
 bool rumble_policy_prepare(RumblePolicy *policy, bool is_dualsense,
@@ -32,8 +33,18 @@ bool rumble_policy_prepare(RumblePolicy *policy, bool is_dualsense,
     *send_right = right;
 
     if (policy->valid && left == policy->last_left &&
-        right == policy->last_right)
-        return false;
+        right == policy->last_right) {
+        uint64_t elapsed = now_ms - policy->last_send_ms;
+        uint64_t interval = policy->last_send_failed
+                                ? CONTROLLER_RUMBLE_RETRY_INTERVAL_MS
+                                : CONTROLLER_RUMBLE_REFRESH_INTERVAL_MS;
+        if ((!left && !right && !policy->last_send_failed) ||
+            elapsed < interval)
+            return false;
+
+        policy->last_send_ms = now_ms;
+        return true;
+    }
 
     bool stopping = left == 0 && right == 0;
     if (is_dualsense && !stopping && policy->valid &&
@@ -45,4 +56,11 @@ bool rumble_policy_prepare(RumblePolicy *policy, bool is_dualsense,
     policy->last_send_ms = now_ms;
     policy->valid = true;
     return true;
+}
+
+void rumble_policy_report_result(RumblePolicy *policy, bool success)
+{
+    if (!policy || !policy->valid)
+        return;
+    policy->last_send_failed = !success;
 }
