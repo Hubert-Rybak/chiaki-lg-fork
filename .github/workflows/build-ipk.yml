@@ -183,6 +183,16 @@ jobs:
         shell: bash
         run: python3 tests/sdl_input_routing_test.py
 
+      - name: Test controller touch and motion mapping
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Isrc -Ichiaki-ng/lib/include \
+            tests/controller_features_test.c src/controller_features.c \
+            chiaki-ng/lib/src/controller.c chiaki-ng/lib/src/orientation.c \
+            -lm -o "$RUNNER_TEMP/controller-features-test"
+          "$RUNNER_TEMP/controller-features-test"
+
       - name: Test stream configuration and recovery policy
         shell: bash
         run: |

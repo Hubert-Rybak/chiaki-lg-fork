@@ -1,5 +1,6 @@
 #include "input.h"
 #include "app_log.h"
+#include "controller_features.h"
 #include "dualsense.h"
 #include "webos_keys.h"
 
@@ -24,12 +25,19 @@ typedef enum {
 struct InputContext {
     pthread_mutex_t mutex;
     ChiakiControllerState state;
+    ControllerFeatures features;
     ChiakiSession *session;
 
     SDL_GameController *controller;
     SDL_JoystickID instance_id;
     bool is_dualsense;
     DualSenseFeedback *dualsense_feedback;
+    bool accel_sensor_enabled;
+    bool gyro_sensor_enabled;
+    bool touch_event_logged;
+    bool accel_event_logged;
+    bool gyro_event_logged;
+    bool motion_reset_pending;
 
     bool back_held;
     bool start_held;
@@ -58,6 +66,16 @@ struct InputContext {
     bool player_index_pending;
     int player_index;
 };
+
+static void reset_controller_state_locked(InputContext *ctx)
+{
+    controller_features_reset(&ctx->features, &ctx->state);
+    ctx->back_held = false;
+    ctx->start_held = false;
+    ctx->chord_active = false;
+    ctx->chord_pending = CHORD_NONE;
+    ctx->motion_reset_pending = false;
+}
 
 static uint64_t monotonic_ms(void)
 {
@@ -184,14 +202,23 @@ static void close_controller(InputContext *ctx)
     const char *name = SDL_GameControllerName(ctx->controller);
     app_log("[INPUT] Closing controller: %s\n", name ? name : "unknown");
     SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (ctx->accel_sensor_enabled)
+        (void)SDL_GameControllerSetSensorEnabled(
+            ctx->controller, SDL_SENSOR_ACCEL, SDL_FALSE);
+    if (ctx->gyro_sensor_enabled)
+        (void)SDL_GameControllerSetSensorEnabled(
+            ctx->controller, SDL_SENSOR_GYRO, SDL_FALSE);
+#endif
 
     pthread_mutex_lock(&ctx->mutex);
-    chiaki_controller_state_set_idle(&ctx->state);
-    ctx->back_held = false;
-    ctx->start_held = false;
-    ctx->chord_active = false;
-    ctx->chord_pending = CHORD_NONE;
+    reset_controller_state_locked(ctx);
     ctx->is_dualsense = false;
+    ctx->accel_sensor_enabled = false;
+    ctx->gyro_sensor_enabled = false;
+    ctx->touch_event_logged = false;
+    ctx->accel_event_logged = false;
+    ctx->gyro_event_logged = false;
     ctx->last_rumble_valid = false;
     DualSenseFeedback *feedback = ctx->dualsense_feedback;
     ctx->dualsense_feedback = NULL;
@@ -235,9 +262,50 @@ static bool open_controller(InputContext *ctx, int device_index)
     bool is_dualsense = controller_is_dualsense(controller);
     DualSenseFeedback *feedback = is_dualsense ? dualsense_feedback_new() : NULL;
 
+    int touchpad_count = 0;
+    int touch_finger_count = 0;
+    bool has_accel = false;
+    bool has_gyro = false;
+    bool accel_enabled = false;
+    bool gyro_enabled = false;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    touchpad_count = SDL_GameControllerGetNumTouchpads(controller);
+    if (touchpad_count > 0)
+        touch_finger_count = SDL_GameControllerGetNumTouchpadFingers(
+            controller, 0);
+    has_accel = SDL_GameControllerHasSensor(
+        controller, SDL_SENSOR_ACCEL) == SDL_TRUE;
+    has_gyro = SDL_GameControllerHasSensor(
+        controller, SDL_SENSOR_GYRO) == SDL_TRUE;
+    if (has_accel) {
+        if (SDL_GameControllerSetSensorEnabled(
+                controller, SDL_SENSOR_ACCEL, SDL_TRUE) == 0) {
+            accel_enabled = true;
+        } else {
+            app_log_always("[INPUT] Could not enable accelerometer: %s\n",
+                           SDL_GetError());
+        }
+    }
+    if (has_gyro) {
+        if (SDL_GameControllerSetSensorEnabled(
+                controller, SDL_SENSOR_GYRO, SDL_TRUE) == 0) {
+            gyro_enabled = true;
+        } else {
+            app_log_always("[INPUT] Could not enable gyroscope: %s\n",
+                           SDL_GetError());
+        }
+    }
+#endif
+
     pthread_mutex_lock(&ctx->mutex);
+    reset_controller_state_locked(ctx);
     ctx->is_dualsense = is_dualsense;
     ctx->dualsense_feedback = feedback;
+    ctx->accel_sensor_enabled = accel_enabled;
+    ctx->gyro_sensor_enabled = gyro_enabled;
+    ctx->touch_event_logged = false;
+    ctx->accel_event_logged = false;
+    ctx->gyro_event_logged = false;
     ctx->last_rumble_valid = false;
     int combined_intensity =
         (ctx->trigger_intensity < 0 ? 0xf0 : ctx->trigger_intensity) |
@@ -251,6 +319,14 @@ static bool open_controller(InputContext *ctx, int device_index)
                    SDL_GameControllerName(controller) ? SDL_GameControllerName(controller) : "unknown",
                    (int)instance,
                    is_dualsense ? "yes" : "no");
+    app_log_always(
+        "[INPUT] Controller features: touchpads=%d fingers=%d "
+        "accel=%s/%s gyro=%s/%s\n",
+        touchpad_count, touch_finger_count,
+        has_accel ? "available" : "unavailable",
+        accel_enabled ? "enabled" : "disabled",
+        has_gyro ? "available" : "unavailable",
+        gyro_enabled ? "enabled" : "disabled");
     return true;
 }
 
@@ -374,6 +450,90 @@ static void handle_controller_axis(InputContext *ctx,
     send_state(ctx);
 }
 
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+static void handle_controller_touchpad(
+    InputContext *ctx, const SDL_ControllerTouchpadEvent *event)
+{
+    if (!ctx->controller || event->which != ctx->instance_id)
+        return;
+
+    ControllerTouchPhase phase;
+    switch (event->type) {
+    case SDL_CONTROLLERTOUCHPADDOWN:
+        phase = CONTROLLER_TOUCH_DOWN;
+        break;
+    case SDL_CONTROLLERTOUCHPADMOTION:
+        phase = CONTROLLER_TOUCH_MOTION;
+        break;
+    case SDL_CONTROLLERTOUCHPADUP:
+        phase = CONTROLLER_TOUCH_UP;
+        break;
+    default:
+        return;
+    }
+
+    pthread_mutex_lock(&ctx->mutex);
+    bool changed = controller_features_handle_touch(
+        &ctx->features, &ctx->state, phase,
+        event->touchpad, event->finger, event->x, event->y);
+    bool first_event = changed && !ctx->touch_event_logged;
+    if (first_event)
+        ctx->touch_event_logged = true;
+    pthread_mutex_unlock(&ctx->mutex);
+
+    if (!changed)
+        return;
+    if (first_event) {
+        app_log_always(
+            "[INPUT] First touch-surface event received (touchpad=%d finger=%d)\n",
+            (int)event->touchpad, (int)event->finger);
+    }
+    send_state(ctx);
+}
+
+static void handle_controller_sensor(
+    InputContext *ctx, const SDL_ControllerSensorEvent *event)
+{
+    if (!ctx->controller || event->which != ctx->instance_id)
+        return;
+
+    ControllerSensorType sensor;
+    if (event->sensor == SDL_SENSOR_ACCEL)
+        sensor = CONTROLLER_SENSOR_ACCEL;
+    else if (event->sensor == SDL_SENSOR_GYRO)
+        sensor = CONTROLLER_SENSOR_GYRO;
+    else
+        return;
+
+    /* Keep timestamp handling identical to the pinned chiaki-ng frontend. */
+    uint32_t timestamp_us = event->timestamp * 1000u;
+    pthread_mutex_lock(&ctx->mutex);
+    bool changed = controller_features_handle_sensor(
+        &ctx->features, &ctx->state, sensor,
+        event->data[0], event->data[1], event->data[2], timestamp_us);
+    bool first_event = false;
+    if (changed && sensor == CONTROLLER_SENSOR_ACCEL &&
+        !ctx->accel_event_logged) {
+        ctx->accel_event_logged = true;
+        first_event = true;
+    } else if (changed && sensor == CONTROLLER_SENSOR_GYRO &&
+               !ctx->gyro_event_logged) {
+        ctx->gyro_event_logged = true;
+        first_event = true;
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+
+    if (!changed)
+        return;
+    if (first_event) {
+        app_log_always("[INPUT] First %s event received\n",
+                       sensor == CONTROLLER_SENSOR_ACCEL
+                           ? "accelerometer" : "gyroscope");
+    }
+    send_state(ctx);
+}
+#endif
+
 static void handle_remote_key(InputContext *ctx, const SDL_KeyboardEvent *event)
 {
     SDL_Keycode key = event->keysym.sym;
@@ -409,7 +569,7 @@ InputContext *input_init(void)
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
     pthread_mutex_init(&ctx->mutex, NULL);
-    chiaki_controller_state_set_idle(&ctx->state);
+    reset_controller_state_locked(ctx);
     ctx->instance_id = -1;
     ctx->rumble_multiplier = 1.0f;
     ctx->haptics_enabled = true;
@@ -431,11 +591,7 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
     pthread_mutex_lock(&ctx->mutex);
     ctx->session = session;
     /* UI controller events must never leak held buttons into a new stream. */
-    chiaki_controller_state_set_idle(&ctx->state);
-    ctx->back_held = false;
-    ctx->start_held = false;
-    ctx->chord_active = false;
-    ctx->chord_pending = CHORD_NONE;
+    reset_controller_state_locked(ctx);
     if (!session) {
         ctx->base_rumble_left = 0;
         ctx->base_rumble_right = 0;
@@ -477,6 +633,16 @@ void input_handle_event(InputContext *ctx, const SDL_Event *event)
     case SDL_CONTROLLERAXISMOTION:
         handle_controller_axis(ctx, &event->caxis);
         break;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    case SDL_CONTROLLERTOUCHPADDOWN:
+    case SDL_CONTROLLERTOUCHPADMOTION:
+    case SDL_CONTROLLERTOUCHPADUP:
+        handle_controller_touchpad(ctx, &event->ctouchpad);
+        break;
+    case SDL_CONTROLLERSENSORUPDATE:
+        handle_controller_sensor(ctx, &event->csensor);
+        break;
+#endif
     case SDL_KEYDOWN:
     case SDL_KEYUP:
         handle_remote_key(ctx, &event->key);
@@ -586,6 +752,10 @@ void input_handle_session_event(InputContext *ctx, const ChiakiEvent *event)
                 event->trigger_effects.type_right, event->trigger_effects.right);
         }
         break;
+    case CHIAKI_EVENT_MOTION_RESET:
+        /* Apply on the SDL thread; session events arrive on Chiaki's thread. */
+        ctx->motion_reset_pending = true;
+        break;
     default:
         break;
     }
@@ -661,6 +831,12 @@ void input_pump(InputContext *ctx)
         chord_changed = true;
     }
 
+    bool motion_reset = ctx->motion_reset_pending;
+    if (motion_reset) {
+        ctx->motion_reset_pending = false;
+        controller_features_reset_motion(&ctx->features, &ctx->state);
+    }
+
     uint64_t now = monotonic_ms();
     float base_multiplier = ctx->is_dualsense ? 1.0f : ctx->rumble_multiplier;
     uint16_t left = scale_rumble((uint8_t)ctx->base_rumble_left, base_multiplier);
@@ -686,7 +862,12 @@ void input_pump(InputContext *ctx)
     bool is_dualsense = ctx->is_dualsense;
     pthread_mutex_unlock(&ctx->mutex);
 
-    if (chord_changed) send_state(ctx);
+    if (motion_reset) {
+        app_log_always("[INPUT] Motion controls recalibrated\n");
+        send_state(ctx);
+    } else if (chord_changed) {
+        send_state(ctx);
+    }
     if (!ctx->controller) return;
 
     if (rumble_changed) {

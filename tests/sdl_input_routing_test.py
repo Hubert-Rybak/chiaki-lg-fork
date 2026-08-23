@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 source = Path("src/main.c").read_text(encoding="utf-8")
+input_source = Path("src/input.c").read_text(encoding="utf-8")
 
 init_position = source.find("SDL_Init(")
 background_hint_position = source.find("SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS")
@@ -29,6 +30,22 @@ for forced_route in (
 
 if 'SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0")' in source:
     raise SystemExit("SDL HIDAPI must remain enabled")
+
+for feature_wiring in (
+    "SDL_CONTROLLERTOUCHPADDOWN",
+    "SDL_CONTROLLERTOUCHPADMOTION",
+    "SDL_CONTROLLERTOUCHPADUP",
+    "SDL_CONTROLLERSENSORUPDATE",
+    "SDL_GameControllerHasSensor",
+    "SDL_GameControllerSetSensorEnabled",
+    "controller_features_handle_touch",
+    "controller_features_handle_sensor",
+    "CHIAKI_EVENT_MOTION_RESET",
+):
+    if feature_wiring not in input_source:
+        raise SystemExit(
+            f"DualSense touch/motion wiring is missing: {feature_wiring}"
+        )
 
 release = "release-2.30.12-webos.5"
 checksum = "4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334"

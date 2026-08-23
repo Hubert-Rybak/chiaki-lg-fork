@@ -167,6 +167,7 @@ static void session_event_cb(ChiakiEvent *event, void *user)
         break;
     case CHIAKI_EVENT_RUMBLE:
     case CHIAKI_EVENT_TRIGGER_EFFECTS:
+    case CHIAKI_EVENT_MOTION_RESET:
     case CHIAKI_EVENT_LED_COLOR:
     case CHIAKI_EVENT_PLAYER_INDEX:
     case CHIAKI_EVENT_HAPTIC_INTENSITY:

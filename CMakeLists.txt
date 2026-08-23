@@ -147,6 +147,7 @@ add_executable(chiaki-webos
     src/video.c
     src/audio.c
     src/input.c
+    src/controller_features.c
     src/dualsense.c
     src/root_feedback.c
     src/ui.c
