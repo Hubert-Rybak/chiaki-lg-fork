@@ -214,11 +214,6 @@ jobs:
             -pthread \
             -o "$RUNNER_TEMP/dualsense-test"
           "$RUNNER_TEMP/dualsense-test"
-          cc -std=c11 -Wall -Wextra -Werror \
-            -Ikernel/hid-playstation-compat \
-            tests/dualsense_input_report_test.c \
-            -o "$RUNNER_TEMP/dualsense-input-report-test"
-          "$RUNNER_TEMP/dualsense-input-report-test"
 
       - name: Test root bootstrap and scripts
         shell: bash
@@ -258,9 +253,9 @@ jobs:
           grep -F 'device_has_input_node' packaging/root/load.sh
           grep -F 'armv7l:4.4.84-*.koli.*)' packaging/root/install.sh
           grep -F 'if [ ! -s "$MODULE" ]' packaging/root/load.sh
-          grep -F 'HID_CONNECT_HIDRAW' \
+          grep -F 'hid_hw_start(hdev, HID_CONNECT_DEFAULT)' \
             kernel/hid-playstation-compat/hid-playstation.c
-          grep -F '.raw_event = dualsense_raw_event' \
+          ! grep -F 'HID_CONNECT_HIDRAW' \
             kernel/hid-playstation-compat/hid-playstation.c
 
       - name: Build webOS 4.4 DualSense kernel modules

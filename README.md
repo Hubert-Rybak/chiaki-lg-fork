@@ -265,20 +265,18 @@ ambiguous/unknown builds fail closed, app launch reapplies it after daemon
 restarts, and uninstall restores the live byte when applicable. The compatibility
 driver is not loaded and Bluetooth pads are not rebound unless that correction
 is confirmed active. Conversely, the correction and advanced userspace output
-are disabled when no ABI-matched module owns the controller, because enhanced
-Bluetooth input cannot be decoded reliably by the old `hid-generic` path. A
-failed driver probe or missing input node restores `hid-generic`, preserving
-basic controller input instead of leaving the pad unusable.
+are disabled when no ABI-matched module owns the controller, avoiding report-mode
+changes while the old `hid-generic` path still owns it. A failed driver probe or
+missing input node restores `hid-generic`, preserving basic controller input
+instead of leaving the pad unusable.
 
 The compatibility module is selected by CPU architecture, kernel release,
-device-tree platform, and module vermagic. It backports Sony's standardized
-gamepad parser for both simple and enhanced DualSense input reports, along with
-native `EV_FF` rumble and the initialization needed by Bluetooth trigger/light
-reports. This is necessary because enabling advanced Bluetooth output is a
-one-way switch to enhanced input reports for that connection; webOS 4.4's
-generic descriptor path does not decode them reliably. The rumble mode follows
-Sony's firmware feature version when available and defaults to the current
-vibration-v2 protocol. Installation diagnostics are written to
+device-tree platform, and module vermagic. It preserves the controller's
+descriptor-derived input mapping—the path verified on the LG OLED G1—while
+adding native `EV_FF` rumble and the initialization needed by Bluetooth
+trigger/light reports. The rumble mode follows Sony's firmware feature version
+when available and defaults to the current vibration-v2 protocol. Installation
+diagnostics are written to
 `/tmp/chiaki-hid-playstation-install.log`; runtime driver messages go to
 `/tmp/chiaki-hid-playstation.log`.
 
