@@ -13,6 +13,7 @@
 #include "dualsense.h"
 #include "app_log.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
