@@ -13,7 +13,7 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
 | TV | webOS / firmware | Platform | Kernel | Verified paths |
 |---|---|---|---|---|
-| LG OLED G1 (`OLED65G13LA`) | webOS `6.5.3`, firmware `03.53.45` | `O20N_DVB_EU`, ARM64 `lge,lg1212` | `4.4.84-229.kcl4tv.6` | Development-IPK installation and 1080p60 streaming. Bluetooth DualSense buttons, touchpad, and motion were verified with the now-withdrawn experimental compatibility stack; native-HID and long-duration stability retesting is pending. |
+| LG OLED G1 (`OLED65G13LA`) | webOS `6.5.3`, firmware `03.53.45` | `O20N_DVB_EU`, ARM64 `lge,lg1212` | `4.4.84-229.kcl4tv.6` | Development-IPK installation and 1080p60 streaming. Native Bluetooth DualSense buttons/axes and gameplay input were verified responsive in default basic mode beyond the previous repeatable 30-second disconnect point. Bluetooth rumble is unavailable in basic mode; touch/motion and rumble remain enhanced-mode opt-ins, and a longer soak is pending. |
 
 The row above records the exact hardware used for regression checks on
 2026-08-23. Streaming and controller feedback still depend on the console,
