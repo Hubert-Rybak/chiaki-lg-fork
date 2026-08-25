@@ -30,8 +30,8 @@ include the TV model as well as the webOS and firmware versions.
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
-- **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads through SDL's standardized controller mapping
-- **Controller feedback** — rumble for supported pads and rate-limited PS5 haptic-to-rumble feedback; advanced Bluetooth writes are quarantined pending a safe in-process transport
+- **Standard gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads through SDL's standardized controller mapping
+- **Controller feedback** — rumble for supported pads and rate-limited PS5 haptic-to-rumble feedback; unstable Bluetooth DualSense enhanced output is opt-in
 - **Magic Remote friendly** — d-pad navigation, pointer hover/click, number-pad IP entry, and Red as a Back/disconnect substitute
 - **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to import registration credentials and the matching manual-host IP
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
@@ -55,7 +55,7 @@ navigation, and package management. The comparison below refers to the original
 |---|---|---|
 | PlayStation controls | Direct evdev mapping; button and axis aliases can vary by TV kernel | Bundled SDL GameController mappings with corrected Square/Triangle positions, analog L2/R2, sticks, and hotplug |
 | Controller feedback | Controller input only | Rumble for supported pads and rate-limited PS5 haptic-to-rumble conversion |
-| Older webOS DualSense support | Direct evdev input | Automatic SDL HIDAPI routing for standardized buttons plus DualSense touch and motion when the TV exposes writable `hidraw`; unverified out-of-tree kernel modules are default-denied |
+| Older webOS DualSense support | Direct evdev input | Automatic SDL HIDAPI routing with stable Bluetooth buttons/axes by default; enhanced Bluetooth rumble/touch/motion is opt-in, USB stays enhanced, and unverified out-of-tree kernel modules are default-denied |
 | Streaming dependencies | Moving/unversioned dependency inputs | chiaki-ng 1.10.0 and SS4S are pinned to exact revisions; builds verify those inputs and reject modified dependency source trees |
 | Video callback contract | Loss/recovery metadata was treated as codec/keyframe metadata | Uses chiaki-ng's exact `frames_lost` / `frame_recovered` contract and detects real H.264/H.265 keyframes from NAL units |
 | Congestion and FEC recovery | Packet-loss reporting was implicitly clamped to zero; no configured FEC-to-IDR path | Reports up to 5% loss by default, enables IDR on FEC failure, and allows chiaki-ng to downgrade an unsupported profile |
@@ -142,6 +142,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 {
     "host": "192.168.1.100",
     "ps5": true,
+    "dualsense_bluetooth_enhanced": false,
     "psn_account_id": "",
     "registered_key": "",
     "rp_key": "",
@@ -169,6 +170,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 |---|---|---|---|
 | `host` | string | `""` | PS5/PS4 local IP address |
 | `ps5` | bool | `true` | `true` for PS5, `false` for PS4 |
+| `dualsense_bluetooth_enhanced` | bool | `false` | Experimental Bluetooth DualSense enhanced mode for rumble, touch, and motion. Keep `false` on LG TVs that report PID `0x0ce6` as unsupported or disconnect the pad. Turning it off requires an app restart and a full controller power-off; USB DualSense is unaffected. |
 | `psn_account_id` | string | `""` | PSN account ID. The canonical chiaki-ng eight-byte base64 form is preferred; a validated unsigned decimal ID is also accepted for compatibility |
 | `registered_key` | string | `""` | Registration key (base64) — written by import |
 | `rp_key` | string | `""` | Remote Play key (base64) — written by import |
@@ -189,8 +191,9 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
 | `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
 
-The two advanced recovery fields are intentionally JSON-only and are not shown
-as rows in the TV Settings screen. Saving ordinary settings preserves them.
+The two advanced recovery fields and the DualSense Bluetooth enhanced-mode
+switch are intentionally JSON-only and are not shown as rows in the TV Settings
+screen. Saving ordinary settings preserves them.
 chiaki-ng exports using `packet_loss_reported_max` (or its legacy
 `packet_loss_max` name) and `idr_on_fec_failure` are imported when present.
 Profile auto-downgrade is always enabled. The recommended balanced values are
@@ -222,20 +225,23 @@ close a working controller. Hotplug can take up to three seconds to appear;
 restart the app if a very fast disconnect/reconnect reuses the same event
 index between polls.
 
-Controller backend selection remains automatic. In particular, Bluetooth
-DualSense and DualSense Edge devices stay on SDL's PS5 HIDAPI path when it is
-available; the app does not disable HIDAPI or pin the controller to a particular
-`/dev/input/event*` node. On the tested webOS 6.5.3 TV, forcing evdev made SDL
-enumerate and open the pad without delivering menu events, while automatic
-selection opened `/dev/hidraw0` and delivered working controller input. Pair the
-pad before launching the app; if it connects later, restart the app. Other
-controller backends remain unchanged.
+Controller backend selection remains automatic. Bluetooth DualSense and
+DualSense Edge devices stay on SDL's PS5 HIDAPI path when available; the app
+does not disable HIDAPI or pin the controller to a `/dev/input/event*` node.
+Bluetooth starts in SDL's simple-report mode by default, providing stable
+buttons and axes without sending LG-sensitive output reports. Set
+`"dualsense_bluetooth_enhanced": true` only for an explicit hardware test of
+rumble, touch, and motion. To return to basic mode, set it to `false`, close the
+app, fully power the controller off by holding its PS button for about ten
+seconds, then restart the app and reconnect it. A normal app restart cannot
+demote a controller that is already emitting enhanced reports. USB DualSense
+enters enhanced mode independently and retains its capabilities.
 
-Rumble is sent only through SDL's selected controller path. For PS5 sessions,
-the haptic audio stream is translated to controller motors, quantized to the
-DualSense protocol's eight-bit amplitudes, and coalesced to at most 20 non-zero
-updates per second; a stop is immediate. The app logs controller firmware and
-battery/power state to make Bluetooth detach reports diagnosable.
+Rumble is sent only when SDL reports that the selected controller path supports
+it. For PS5 sessions, the haptic audio stream is translated to controller motors
+and coalesced to at most 20 non-zero updates per second; a stop is immediate.
+Default Bluetooth DualSense simple mode deliberately reports no rumble, touch,
+or motion so older LG HID bridges cannot be switched into an unstable mode.
 
 The IPK does not package or load the experimental `hid-playstation` modules and
 does not patch LG's Bluetooth daemon. Its root bootstrap exists only to remove
@@ -306,7 +312,9 @@ Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see ab
 
 **Controller input works but rumble/triggers/lightbar do not**
 Check the `[INPUT]` and `[DUALSENSE]` lines in `/tmp/chiaki.log`. Basic rumble is
-available only when SDL reports rumble support. Adaptive triggers, custom
+available only when SDL reports rumble support. Bluetooth DualSense enhanced
+mode is off by default for stability; its JSON opt-in may disconnect the pad on
+older LG firmware. Adaptive triggers, custom
 lightbar colour, and player LEDs are intentionally unavailable in the current
 safety build; they require a transport that neither forks from the streaming
 process nor depends on an unverified kernel module.
@@ -320,6 +328,10 @@ its helper so the next launch can retry.
 Set `log_level` to `"info"`, launch the app with the controller connected, and
 inspect the `[INPUT]` lines in `/tmp/chiaki.log`. They include SDL's device index,
 name, selected device path, GUID, vendor/product IDs, and mapping decision.
+If LG logs DualSense PID `0x0ce6` as `not_support_gamepad`, leave
+`dualsense_bluetooth_enhanced` false, fully power the pad off, restart the app,
+and reconnect it. SDL cannot switch an already-enhanced Bluetooth pad back to
+basic reports until the controller itself has been powered off.
 Do not publish a complete verbose Chiaki log or `config.json`, because
 authentication material may be present.
 
@@ -365,8 +377,9 @@ five-second stall, and sustained decoder latency also triggers a rebuild.
 
 Gamepad input uses the bundled webosbrew SDL GameController layer. SDL's
 standard A/B/X/Y and trigger axes are translated to `ChiakiControllerState`,
-with controller hotplug handled by the main event loop. DualSense touch and
-motion use SDL's HIDAPI events. SDL is also the sole output writer, and
+with controller hotplug handled by the main event loop. Bluetooth DualSense uses
+stable simple reports by default; touch, motion, and rumble require the explicit
+enhanced-mode opt-in or USB. SDL remains the sole output writer, and supported
 DualSense rumble is rate-limited to protect older Bluetooth stacks.
 
 ### webOS version auto-detection

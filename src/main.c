@@ -1288,14 +1288,23 @@ int main(int argc, char *argv[])
     SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_RIBBON", "false");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     /*
-     * A Bluetooth DualSense powers up in SDL's simple-report mode unless the
-     * PS5 HIDAPI rumble hint is enabled before SDL initializes.  Simple mode
-     * exposes buttons and axes, but no rumble, touchpad, or motion sensors.
-     * This keeps SDL's automatic backend selection while opting into the
-     * controller's native enhanced reports and sole-writer output path.
+     * Bluetooth DualSense starts in a stable simple-report mode that exposes
+     * buttons and axes. Enhanced mode adds rumble, touch, and motion, but the
+     * LG webOS 6 HID bridge on some TVs classifies PID 0x0ce6 as unsupported
+     * and removes it after SDL sends the mode-switch report. Make enhanced
+     * Bluetooth explicitly opt-in and override any inherited SDL hint. USB
+     * DualSense enters enhanced mode independently and keeps all features.
      */
-    if (SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1") != SDL_TRUE)
-        app_log_always("[INPUT] Could not enable SDL DualSense enhanced mode\n");
+    const char *dualsense_enhanced_hint =
+        cfg.dualsense_bluetooth_enhanced ? "1" : "0";
+    if (SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE,
+                                dualsense_enhanced_hint,
+                                SDL_HINT_OVERRIDE) != SDL_TRUE) {
+        app_log_always(
+            "[INPUT] Could not apply DualSense Bluetooth enhanced-mode policy\n");
+    }
+    app_log_always("[INPUT] DualSense Bluetooth enhanced-mode policy: %s\n",
+                   cfg.dualsense_bluetooth_enhanced ? "enabled" : "basic");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
@@ -1374,7 +1383,7 @@ int main(int argc, char *argv[])
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
 
-    InputContext *input_ctx = input_init();
+    InputContext *input_ctx = input_init(cfg.dualsense_bluetooth_enhanced);
     if (!input_ctx)
         app_log_always("[INPUT] Initialization failed; continuing without a controller\n");
 

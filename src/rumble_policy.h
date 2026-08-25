@@ -19,10 +19,11 @@ typedef struct rumble_policy_t {
 void rumble_policy_reset(RumblePolicy *policy);
 
 /*
- * Coalesce DualSense HIDAPI output to its eight-bit motor resolution.  The
- * first value and a stop are sent immediately; non-zero changes are bounded to
- * one write per interval.  Other controller backends retain full precision and
- * are not rate-limited.
+ * Coalesce DualSense HIDAPI output to its eight-bit motor resolution. The
+ * first non-zero value and a later stop are sent immediately; an initial
+ * zero is omitted because a newly opened controller is already stopped.
+ * Non-zero changes are bounded to one write per interval. Other controller
+ * backends retain full precision and are not rate-limited.
  */
 bool rumble_policy_prepare(RumblePolicy *policy, bool is_dualsense,
                            uint64_t now_ms, uint16_t desired_left,

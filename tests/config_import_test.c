@@ -85,6 +85,19 @@ static void assert_advanced_stream_settings(const char *config_path)
     free(generated);
 }
 
+static void assert_dualsense_enhanced(const char *config_path, bool expected)
+{
+    char *generated = read_text(config_path);
+    const char *needle = expected
+        ? "\"dualsense_bluetooth_enhanced\": true"
+        : "\"dualsense_bluetooth_enhanced\": false";
+    if (!strstr(generated, needle)) {
+        free(generated);
+        fail("DualSense Bluetooth safety setting was not preserved");
+    }
+    free(generated);
+}
+
 static void assert_qt_named_escapes(void)
 {
     static const uint8_t expected[] = {
@@ -99,9 +112,54 @@ static void assert_qt_named_escapes(void)
         fail("Qt named ByteArray escapes were decoded incorrectly");
 }
 
+static void assert_strict_safety_bool(void)
+{
+    const char *key = "dualsense_bluetooth_enhanced";
+    if (!extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": true}", key, false))
+        fail("exact safety opt-in was not accepted");
+    if (extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": false}", key, true))
+        fail("exact false safety value was not accepted");
+    if (extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": trueXYZ}", key, false))
+        fail("malformed safety opt-in did not fail closed");
+    if (extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": true garbage}", key, false))
+        fail("safety opt-in with trailing garbage did not fail closed");
+    if (extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": true} garbage", key, false))
+        fail("JSON with trailing garbage did not fail closed");
+    if (extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": true,"
+            "\"dualsense_bluetooth_enhanced\": false}", key, false))
+        fail("duplicate safety opt-in did not fail closed");
+    if (extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\": true,"
+            "\"\\u0064ualsense_bluetooth_enhanced\": false}", key, false))
+        fail("escaped duplicate safety opt-in did not fail closed");
+    if (!extract_unique_json_bool(
+            "{\"dualsense_bluetooth_enhanced\":true,"
+            "\"note\":\"\\\"dualsense_bluetooth_enhanced\\\": false\"}",
+            key, false))
+        fail("key-like string content hid a valid top-level safety opt-in");
+    if (!extract_unique_json_bool(
+            "{\"nested\":{\"dualsense_bluetooth_enhanced\":false},"
+            "\"values\":[1,null,\"x\"],"
+            "\"dualsense_bluetooth_enhanced\":true}", key, false))
+        fail("nested key or unrelated values hid the top-level safety opt-in");
+    if (extract_unique_json_bool(
+            "{\"nested\":{\"dualsense_bluetooth_enhanced\":true}}",
+            key, false))
+        fail("nested-only safety key was treated as a top-level opt-in");
+    if (extract_unique_json_bool("{}", key, false))
+        fail("missing safety opt-in did not default off");
+}
+
 static void run_case(const char *dir, const char *name,
                      const char *existing_host,
                      const char *manual_mac,
+                     int existing_enhanced,
                      const char *expected_host,
                      ChiakiImportResult expected_result,
                      int verify_reimport)
@@ -109,8 +167,13 @@ static void run_case(const char *dir, const char *name,
     char ini_path[512];
     char imported_path[544];
     char config_path[512];
-    char config[512];
+    char config[640];
     char ini[4096];
+    const char *enhanced_line = existing_enhanced < 0
+        ? ""
+        : (existing_enhanced
+            ? "  \"dualsense_bluetooth_enhanced\": true,\n"
+            : "  \"dualsense_bluetooth_enhanced\": false,\n");
 
     snprintf(ini_path, sizeof(ini_path), "%s/%s.ini", dir, name);
     snprintf(imported_path, sizeof(imported_path), "%s.imported", ini_path);
@@ -118,10 +181,11 @@ static void run_case(const char *dir, const char *name,
     snprintf(config, sizeof(config),
              "{\n  \"host\": \"%s\",\n  \"video_width\": 1920,\n"
              "  \"video_height\": 1080,\n  \"video_fps\": 60,\n"
+             "%s"
              "  \"packet_loss_max\": 0.15,\n"
              "  \"idr_on_fec_failure\": true,\n"
              "  \"psn_refresh_token\": \"\"\n}\n",
-             existing_host);
+             existing_host, enhanced_line);
     snprintf(ini, sizeof(ini),
              "[registered_hosts]\n"
              "1\\target=1000100\n"
@@ -149,6 +213,7 @@ static void run_case(const char *dir, const char *name,
     assert_host(config_path, expected_host);
     assert_safe_wakeup_delay(config_path);
     assert_advanced_stream_settings(config_path);
+    assert_dualsense_enhanced(config_path, existing_enhanced > 0);
 
     if (verify_reimport) {
         /* The TV keeps the export as .imported after the first successful run. */
@@ -158,6 +223,7 @@ static void run_case(const char *dir, const char *name,
         assert_host(config_path, expected_host);
         assert_safe_wakeup_delay(config_path);
         assert_advanced_stream_settings(config_path);
+        assert_dualsense_enhanced(config_path, existing_enhanced > 0);
     }
 
     unlink(imported_path);
@@ -167,6 +233,7 @@ static void run_case(const char *dir, const char *name,
 int main(void)
 {
     assert_qt_named_escapes();
+    assert_strict_safety_bool();
 
     char dir[256];
     snprintf(dir, sizeof(dir), "/tmp/chiaki-config-import-test-%ld", (long)getpid());
@@ -178,13 +245,13 @@ int main(void)
         "@ByteArray(\\x01\\x02\\x03\\x04\\x05\\x07)";
 
     run_case(dir, "matching-overrides", "203.0.113.10",
-             matching_mac, "192.168.50.20", CI_SUCCESS, 1);
+             matching_mac, 1, "192.168.50.20", CI_SUCCESS, 1);
     run_case(dir, "matching-fills-empty", "",
-             matching_mac, "192.168.50.20", CI_SUCCESS, 0);
+             matching_mac, -1, "192.168.50.20", CI_SUCCESS, 0);
     run_case(dir, "mismatch-preserves", "192.168.50.99",
-             different_mac, "192.168.50.99", CI_SUCCESS, 0);
+             different_mac, 0, "192.168.50.99", CI_SUCCESS, 0);
     run_case(dir, "mismatch-needs-host", "",
-             different_mac, "", CI_SUCCESS_NEEDS_HOST, 0);
+             different_mac, -1, "", CI_SUCCESS_NEEDS_HOST, 0);
 
     if (rmdir(dir) != 0) fail("could not remove temporary directory");
     puts("config_import_test: passed");

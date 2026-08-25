@@ -26,6 +26,12 @@ typedef enum {
     CHORD_START,
 } PendingChordButton;
 
+typedef enum {
+    CONTROLLER_TRANSPORT_UNKNOWN = 0,
+    CONTROLLER_TRANSPORT_USB,
+    CONTROLLER_TRANSPORT_BLUETOOTH,
+} ControllerTransport;
+
 struct InputContext {
     pthread_mutex_t mutex;
     ChiakiControllerState state;
@@ -38,6 +44,8 @@ struct InputContext {
     DualSenseFeedback *dualsense_feedback;
     bool accel_sensor_enabled;
     bool gyro_sensor_enabled;
+    bool rumble_available;
+    bool dualsense_bluetooth_enhanced;
     bool touch_event_logged;
     bool accel_event_logged;
     bool gyro_event_logged;
@@ -152,6 +160,90 @@ static const char *power_level_name(SDL_JoystickPowerLevel power)
     }
 }
 
+static const char *controller_transport_name(ControllerTransport transport)
+{
+    switch (transport) {
+    case CONTROLLER_TRANSPORT_USB:       return "usb";
+    case CONTROLLER_TRANSPORT_BLUETOOTH: return "bluetooth";
+    case CONTROLLER_TRANSPORT_UNKNOWN:
+    default:                             return "unknown";
+    }
+}
+
+/* SDL-webOS does not expose HIDAPI's Bluetooth flag through its public API.
+ * Resolve it from Linux hidraw/input sysfs so the stability policy can still
+ * allow full USB feedback without writing to a Bluetooth DualSense. */
+static ControllerTransport controller_transport_from_path(const char *path)
+{
+    if (!path)
+        return CONTROLLER_TRANSPORT_UNKNOWN;
+
+    const char *node = strrchr(path, '/');
+    node = node ? node + 1 : path;
+    const char *digits = NULL;
+    bool hidraw = false;
+    if (strncmp(node, "hidraw", 6) == 0) {
+        digits = node + 6;
+        hidraw = true;
+    } else if (strncmp(node, "event", 5) == 0) {
+        digits = node + 5;
+    } else if (strncmp(node, "js", 2) == 0) {
+        digits = node + 2;
+    }
+    if (!digits || *digits == '\0')
+        return CONTROLLER_TRANSPORT_UNKNOWN;
+    for (const char *p = digits; *p; ++p) {
+        if (*p < '0' || *p > '9')
+            return CONTROLLER_TRANSPORT_UNKNOWN;
+    }
+
+    char uevent_path[PATH_MAX];
+    int written = hidraw
+        ? snprintf(uevent_path, sizeof(uevent_path),
+                   "/sys/class/hidraw/%s/device/uevent", node)
+        : snprintf(uevent_path, sizeof(uevent_path),
+                   "/sys/class/input/%s/device/id/bustype", node);
+    if (written <= 0 || (size_t)written >= sizeof(uevent_path))
+        return CONTROLLER_TRANSPORT_UNKNOWN;
+
+    FILE *f = fopen(uevent_path, "r");
+    if (!f)
+        return CONTROLLER_TRANSPORT_UNKNOWN;
+
+    ControllerTransport transport = CONTROLLER_TRANSPORT_UNKNOWN;
+    char line[160];
+    while (fgets(line, sizeof(line), f)) {
+        unsigned bus = 0;
+        int parsed = hidraw
+            ? sscanf(line, "HID_ID=%x:", &bus)
+            : sscanf(line, "%x", &bus);
+        if (parsed != 1)
+            continue;
+        if (bus == 0x0003)
+            transport = CONTROLLER_TRANSPORT_USB;
+        else if (bus == 0x0005)
+            transport = CONTROLLER_TRANSPORT_BLUETOOTH;
+        break;
+    }
+    fclose(f);
+    return transport;
+}
+
+static ControllerTransport controller_transport_with_power_fallback(
+    const char *path, SDL_JoystickPowerLevel power)
+{
+    ControllerTransport transport = controller_transport_from_path(path);
+    if (transport != CONTROLLER_TRANSPORT_UNKNOWN)
+        return transport;
+    if (power == SDL_JOYSTICK_POWER_WIRED)
+        return CONTROLLER_TRANSPORT_USB;
+    if (power >= SDL_JOYSTICK_POWER_EMPTY &&
+        power <= SDL_JOYSTICK_POWER_FULL) {
+        return CONTROLLER_TRANSPORT_BLUETOOTH;
+    }
+    return CONTROLLER_TRANSPORT_UNKNOWN;
+}
+
 static bool log_controller_candidate(int device_index)
 {
     const char *name = SDL_JoystickNameForIndex(device_index);
@@ -238,7 +330,8 @@ static void close_controller(InputContext *ctx)
                    name ? name : "unknown", (int)ctx->instance_id,
                    power_level_name(power),
                    (unsigned long long)monotonic_ms());
-    SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
+    if (ctx->rumble_available)
+        (void)SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     if (ctx->accel_sensor_enabled)
         (void)SDL_GameControllerSetSensorEnabled(
@@ -253,6 +346,7 @@ static void close_controller(InputContext *ctx)
     ctx->is_dualsense = false;
     ctx->accel_sensor_enabled = false;
     ctx->gyro_sensor_enabled = false;
+    ctx->rumble_available = false;
     ctx->touch_event_logged = false;
     ctx->accel_event_logged = false;
     ctx->gyro_event_logged = false;
@@ -282,6 +376,11 @@ static bool open_controller(InputContext *ctx, int device_index)
         return false;
     }
 
+    char device_path[PATH_MAX] = {0};
+    const char *candidate_path = SDL_JoystickPathForIndex(device_index);
+    if (candidate_path)
+        snprintf(device_path, sizeof(device_path), "%s", candidate_path);
+
     SDL_GameController *controller = SDL_GameControllerOpen(device_index);
     if (!controller) {
         app_log("[INPUT] SDL_GameControllerOpen(%d) failed: %s\n",
@@ -300,6 +399,12 @@ static bool open_controller(InputContext *ctx, int device_index)
     ctx->controller = controller;
     ctx->instance_id = instance;
     bool is_dualsense = controller_is_dualsense(controller);
+    SDL_JoystickPowerLevel power = SDL_JoystickCurrentPowerLevel(joystick);
+    ControllerTransport transport = controller_transport_with_power_fallback(
+        device_path[0] ? device_path : NULL, power);
+    bool dualsense_advanced_allowed = !is_dualsense ||
+        ctx->dualsense_bluetooth_enhanced ||
+        transport == CONTROLLER_TRANSPORT_USB;
     /*
      * Keep SDL HIDAPI as the sole live DualSense output writer.  The former
      * Luna path forked a helper for every advanced-feedback report after the
@@ -313,6 +418,7 @@ static bool open_controller(InputContext *ctx, int device_index)
     int touch_finger_count = 0;
     bool has_accel = false;
     bool has_gyro = false;
+    bool rumble_available = false;
     bool accel_enabled = false;
     bool gyro_enabled = false;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
@@ -324,7 +430,7 @@ static bool open_controller(InputContext *ctx, int device_index)
         controller, SDL_SENSOR_ACCEL) == SDL_TRUE;
     has_gyro = SDL_GameControllerHasSensor(
         controller, SDL_SENSOR_GYRO) == SDL_TRUE;
-    if (has_accel) {
+    if (has_accel && dualsense_advanced_allowed) {
         if (SDL_GameControllerSetSensorEnabled(
                 controller, SDL_SENSOR_ACCEL, SDL_TRUE) == 0) {
             accel_enabled = true;
@@ -333,7 +439,7 @@ static bool open_controller(InputContext *ctx, int device_index)
                            SDL_GetError());
         }
     }
-    if (has_gyro) {
+    if (has_gyro && dualsense_advanced_allowed) {
         if (SDL_GameControllerSetSensorEnabled(
                 controller, SDL_SENSOR_GYRO, SDL_TRUE) == 0) {
             gyro_enabled = true;
@@ -343,12 +449,25 @@ static bool open_controller(InputContext *ctx, int device_index)
         }
     }
 #endif
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+    bool sdl_rumble_available =
+        SDL_GameControllerHasRumble(controller) == SDL_TRUE;
+#else
+    /* SDL_GameControllerRumble predates the capability query. Preserve the
+     * previous behavior for non-pinned host builds while the Bluetooth policy
+     * still blocks unsafe DualSense output. */
+    bool sdl_rumble_available = true;
+#endif
+    rumble_available = sdl_rumble_available && dualsense_advanced_allowed;
+    bool advanced_capabilities_observed = touchpad_count > 0 || has_accel ||
+                                          has_gyro || sdl_rumble_available;
 
     pthread_mutex_lock(&ctx->mutex);
     ctx->is_dualsense = is_dualsense;
     ctx->dualsense_feedback = feedback;
     ctx->accel_sensor_enabled = accel_enabled;
     ctx->gyro_sensor_enabled = gyro_enabled;
+    ctx->rumble_available = rumble_available;
     ctx->touch_event_logged = false;
     ctx->accel_event_logged = false;
     ctx->gyro_event_logged = false;
@@ -368,6 +487,29 @@ static bool open_controller(InputContext *ctx, int device_index)
         app_log_always("[DUALSENSE] Advanced Bluetooth feedback disabled; "
                        "SDL is the sole controller-output path\n");
 
+    if (is_dualsense) {
+        app_log_always(
+            "[INPUT] DualSense transport=%s advanced_capabilities=%s "
+            "bluetooth_policy=%s app_output=%s\n",
+            controller_transport_name(transport),
+            advanced_capabilities_observed ? "yes" : "no",
+            ctx->dualsense_bluetooth_enhanced ? "enabled" : "basic",
+            dualsense_advanced_allowed ? "allowed" : "blocked");
+        if (!ctx->dualsense_bluetooth_enhanced &&
+            transport == CONTROLLER_TRANSPORT_BLUETOOTH &&
+            advanced_capabilities_observed) {
+            app_log_always(
+                "[INPUT] DualSense arrived in one-way enhanced Bluetooth mode; "
+                "fully power it off, then reconnect it for stable basic mode\n");
+        } else if (!ctx->dualsense_bluetooth_enhanced &&
+                   transport == CONTROLLER_TRANSPORT_UNKNOWN &&
+                   advanced_capabilities_observed) {
+            app_log_always(
+                "[INPUT] DualSense transport is unknown; app output is blocked "
+                "by the basic-mode safety policy\n");
+        }
+    }
+
     app_log_always("[INPUT] Controller opened: %s (instance=%d, DualSense=%s)\n",
                    SDL_GameControllerName(controller) ? SDL_GameControllerName(controller) : "unknown",
                    (int)instance,
@@ -380,13 +522,15 @@ static bool open_controller(InputContext *ctx, int device_index)
         accel_enabled ? "enabled" : "disabled",
         has_gyro ? "available" : "unavailable",
         gyro_enabled ? "enabled" : "disabled",
-        SDL_GameControllerHasRumble(controller) == SDL_TRUE ? "available" : "unavailable",
+        sdl_rumble_available
+            ? (rumble_available ? "available" : "blocked-by-policy")
+            : "unavailable",
 #if SDL_VERSION_ATLEAST(2, 24, 0)
         (unsigned)SDL_GameControllerGetFirmwareVersion(controller),
 #else
         0u,
 #endif
-        power_level_name(SDL_JoystickCurrentPowerLevel(joystick)));
+        power_level_name(power));
     return true;
 }
 
@@ -631,7 +775,7 @@ static void handle_remote_key(InputContext *ctx, const SDL_KeyboardEvent *event)
     send_state(ctx);
 }
 
-InputContext *input_init(void)
+InputContext *input_init(bool dualsense_bluetooth_enhanced)
 {
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -643,6 +787,7 @@ InputContext *input_init(void)
     ctx->triggers_enabled = true;
     ctx->haptic_intensity = 0x00;
     ctx->trigger_intensity = 0x00;
+    ctx->dualsense_bluetooth_enhanced = dualsense_bluetooth_enhanced;
     SDL_version linked;
     SDL_GetVersion(&linked);
     app_log_always("[INPUT] SDL runtime %u.%u.%u; standardized GameController input enabled\n",
@@ -679,6 +824,7 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
         rumble_policy_reset(&ctx->rumble_policy);
     }
     DualSenseFeedback *feedback = ctx->dualsense_feedback;
+    bool rumble_available = ctx->rumble_available;
     pthread_mutex_unlock(&ctx->mutex);
 
     if (!session) {
@@ -687,8 +833,8 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
                            "haptic_frames=%llu\n",
                            (unsigned long long)rumble_events,
                            (unsigned long long)haptic_frames);
-        if (ctx->controller)
-            SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
+        if (ctx->controller && rumble_available)
+            (void)SDL_GameControllerRumble(ctx->controller, 0, 0, 0);
         dualsense_feedback_release(feedback);
     } else {
         send_state(ctx);
@@ -978,7 +1124,8 @@ void input_pump(InputContext *ctx)
         if (ctx->haptic_rumble_right > right) right = ctx->haptic_rumble_right;
     }
     bool is_dualsense = ctx->is_dualsense;
-    bool rumble_due = rumble_policy_prepare(
+    bool rumble_available = ctx->rumble_available;
+    bool rumble_due = rumble_available && rumble_policy_prepare(
         &ctx->rumble_policy, is_dualsense, now, left, right, &left, &right);
     bool log_rumble_write = rumble_due && (left || right) &&
                             !ctx->rumble_write_logged;

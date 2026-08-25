@@ -38,7 +38,8 @@ int main(void)
         "  \"video_bitrate\": 1,\n"
         "  \"video_codec\": \"av1\",\n"
         "  \"packet_loss_max\": \"bad\",\n"
-        "  \"idr_on_fec_failure\": \"true\"\n"
+        "  \"idr_on_fec_failure\": \"true\",\n"
+        "  \"dualsense_bluetooth_enhanced\": \"true\"\n"
         "}\n");
 
     AppConfig config;
@@ -53,6 +54,8 @@ int main(void)
     if (fabs(config.packet_loss_max - 0.05) > 0.0001 ||
         !config.idr_on_fec_failure)
         fail("invalid advanced settings did not use balanced defaults");
+    if (config.dualsense_bluetooth_enhanced)
+        fail("invalid DualSense Bluetooth setting did not fail closed");
     config_free(&config);
 
     write_config(path,
@@ -61,13 +64,26 @@ int main(void)
         "  \"video_width\": 1280,\n"
         "  \"video_height\": 720,\n"
         "  \"packet_loss_max\": 0.25,\n"
-        "  \"idr_on_fec_failure\": false\n"
+        "  \"idr_on_fec_failure\": false,\n"
+        "  \"dualsense_bluetooth_enhanced\": true\n"
         "}\n");
     if (config_load(&config, path) != 0)
         fail("valid-values fixture did not load");
     if (fabs(config.packet_loss_max - 0.25) > 0.0001 ||
         config.idr_on_fec_failure)
         fail("valid advanced settings were not retained");
+    if (!config.dualsense_bluetooth_enhanced)
+        fail("explicit DualSense Bluetooth opt-in was not retained");
+    config_free(&config);
+
+    write_config(path,
+        "{\n"
+        "  \"host\": \"192.0.2.1\"\n"
+        "}\n");
+    if (config_load(&config, path) != 0)
+        fail("missing-DualSense-setting fixture did not load");
+    if (config.dualsense_bluetooth_enhanced)
+        fail("missing DualSense Bluetooth setting did not default off");
     config_free(&config);
 
     unlink(path);

@@ -32,6 +32,12 @@ bool rumble_policy_prepare(RumblePolicy *policy, bool is_dualsense,
     *send_left = left;
     *send_right = right;
 
+    /* A newly opened controller is already stopped. Avoid an unnecessary
+     * output report, which can switch a Bluetooth DualSense out of its stable
+     * simple-report compatibility mode. */
+    if (!policy->valid && !left && !right)
+        return false;
+
     if (policy->valid && left == policy->last_left &&
         right == policy->last_right) {
         uint64_t elapsed = now_ms - policy->last_send_ms;

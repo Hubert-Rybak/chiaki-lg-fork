@@ -254,23 +254,307 @@ static void process_line(IniData *d, const char *section,
     }
 }
 
-/* ── Minimal host extraction from existing config.json ───────────────────────
- * We only need to preserve "host" (and optionally video params).
- * We avoid pulling json-c in here by doing a simple search, since config_load
- * has not been called yet at import time.
+/* ── Minimal value extraction from existing config.json ──────────────────────
+ * Most legacy fields below use the original lightweight searches. The
+ * DualSense mode is a safety-sensitive opt-in, so its helper validates the
+ * complete JSON structure and only accepts one exact top-level boolean without
+ * adding a json-c dependency to this importer.
  */
+static const char *json_skip_whitespace(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        p++;
+    return p;
+}
+
+static int json_hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool json_read_hex4(const char **cursor, unsigned *value)
+{
+    const char *p = *cursor;
+    unsigned result = 0;
+    for (int i = 0; i < 4; i++) {
+        int digit = json_hex_value(*p++);
+        if (digit < 0)
+            return false;
+        result = (result << 4) | (unsigned)digit;
+    }
+    *cursor = p;
+    *value = result;
+    return true;
+}
+
+/* Parse a JSON string and optionally compare its decoded value with an ASCII
+ * key. Escaped spellings such as "\\u0064ualsense..." compare equal too, so
+ * they cannot bypass duplicate-key detection. */
+static bool json_parse_string(const char **cursor, const char *key,
+                              bool *matches_key)
+{
+    const char *p = *cursor;
+    size_t key_pos = 0;
+    bool matches = key != NULL;
+
+    if (*p++ != '"')
+        return false;
+
+    while (*p) {
+        unsigned codepoint;
+        unsigned char c = (unsigned char)*p++;
+        if (c == '"') {
+            *cursor = p;
+            if (matches_key)
+                *matches_key = matches && key[key_pos] == '\0';
+            return true;
+        }
+        if (c < 0x20)
+            return false;
+
+        if (c != '\\') {
+            codepoint = c;
+        } else {
+            char escape = *p++;
+            switch (escape) {
+            case '"': codepoint = '"'; break;
+            case '\\': codepoint = '\\'; break;
+            case '/':  codepoint = '/';  break;
+            case 'b':  codepoint = '\b'; break;
+            case 'f':  codepoint = '\f'; break;
+            case 'n':  codepoint = '\n'; break;
+            case 'r':  codepoint = '\r'; break;
+            case 't':  codepoint = '\t'; break;
+            case 'u': {
+                if (!json_read_hex4(&p, &codepoint))
+                    return false;
+                if (codepoint >= 0xd800 && codepoint <= 0xdbff) {
+                    unsigned low;
+                    if (*p++ != '\\' || *p++ != 'u' ||
+                        !json_read_hex4(&p, &low) ||
+                        low < 0xdc00 || low > 0xdfff) {
+                        return false;
+                    }
+                    codepoint = 0x10000u +
+                        ((codepoint - 0xd800u) << 10) + (low - 0xdc00u);
+                } else if (codepoint >= 0xdc00 && codepoint <= 0xdfff) {
+                    return false;
+                }
+                break;
+            }
+            default:
+                return false;
+            }
+        }
+
+        if (matches) {
+            unsigned char expected = (unsigned char)key[key_pos];
+            if (expected == '\0' || codepoint != expected)
+                matches = false;
+            else
+                key_pos++;
+        }
+    }
+    return false;
+}
+
+static bool json_skip_value(const char **cursor, unsigned depth);
+
+static bool json_skip_array(const char **cursor, unsigned depth)
+{
+    const char *p = json_skip_whitespace(*cursor + 1);
+    if (*p == ']') {
+        *cursor = p + 1;
+        return true;
+    }
+
+    for (;;) {
+        if (!json_skip_value(&p, depth + 1))
+            return false;
+        p = json_skip_whitespace(p);
+        if (*p == ']') {
+            *cursor = p + 1;
+            return true;
+        }
+        if (*p++ != ',')
+            return false;
+        p = json_skip_whitespace(p);
+    }
+}
+
+static bool json_skip_object(const char **cursor, unsigned depth)
+{
+    const char *p = json_skip_whitespace(*cursor + 1);
+    if (*p == '}') {
+        *cursor = p + 1;
+        return true;
+    }
+
+    for (;;) {
+        if (!json_parse_string(&p, NULL, NULL))
+            return false;
+        p = json_skip_whitespace(p);
+        if (*p++ != ':')
+            return false;
+        if (!json_skip_value(&p, depth + 1))
+            return false;
+        p = json_skip_whitespace(p);
+        if (*p == '}') {
+            *cursor = p + 1;
+            return true;
+        }
+        if (*p++ != ',')
+            return false;
+        p = json_skip_whitespace(p);
+    }
+}
+
+static bool json_skip_number(const char **cursor)
+{
+    const char *p = *cursor;
+    if (*p == '-')
+        p++;
+    if (*p == '0') {
+        p++;
+    } else {
+        if (*p < '1' || *p > '9')
+            return false;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
+    if (*p == '.') {
+        p++;
+        if (*p < '0' || *p > '9')
+            return false;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-')
+            p++;
+        if (*p < '0' || *p > '9')
+            return false;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
+    *cursor = p;
+    return true;
+}
+
+static bool json_skip_value(const char **cursor, unsigned depth)
+{
+    const char *p = json_skip_whitespace(*cursor);
+    if (depth > 64)
+        return false;
+
+    if (*p == '"') {
+        if (!json_parse_string(&p, NULL, NULL))
+            return false;
+    } else if (*p == '{') {
+        if (!json_skip_object(&p, depth))
+            return false;
+    } else if (*p == '[') {
+        if (!json_skip_array(&p, depth))
+            return false;
+    } else if (!strncmp(p, "true", 4)) {
+        p += 4;
+    } else if (!strncmp(p, "false", 5)) {
+        p += 5;
+    } else if (!strncmp(p, "null", 4)) {
+        p += 4;
+    } else if (*p == '-' || (*p >= '0' && *p <= '9')) {
+        if (!json_skip_number(&p))
+            return false;
+    } else {
+        return false;
+    }
+
+    *cursor = p;
+    return true;
+}
+
+/* Preserve a safety-sensitive opt-in only when its decoded key appears once
+ * at the top level and its value is an exact JSON boolean. Any malformed,
+ * duplicate, nested-only, or otherwise ambiguous input fails closed. */
+static bool extract_unique_json_bool(const char *json, const char *key,
+                                     bool default_value)
+{
+    if (!json || !key)
+        return default_value;
+
+    const char *p = json_skip_whitespace(json);
+    if (*p++ != '{')
+        return default_value;
+    p = json_skip_whitespace(p);
+
+    bool seen = false;
+    bool valid_value = false;
+    bool value = default_value;
+    if (*p == '}')
+        p++;
+    else {
+        for (;;) {
+            bool matches_key = false;
+            if (!json_parse_string(&p, key, &matches_key))
+                return default_value;
+            p = json_skip_whitespace(p);
+            if (*p++ != ':')
+                return default_value;
+            p = json_skip_whitespace(p);
+
+            if (matches_key) {
+                if (seen)
+                    return default_value;
+                seen = true;
+                if (!strncmp(p, "true", 4)) {
+                    value = true;
+                    valid_value = true;
+                    p += 4;
+                } else if (!strncmp(p, "false", 5)) {
+                    value = false;
+                    valid_value = true;
+                    p += 5;
+                } else {
+                    valid_value = false;
+                    if (!json_skip_value(&p, 1))
+                        return default_value;
+                }
+            } else if (!json_skip_value(&p, 1)) {
+                return default_value;
+            }
+
+            p = json_skip_whitespace(p);
+            if (*p == '}') {
+                p++;
+                break;
+            }
+            if (*p++ != ',')
+                return default_value;
+            p = json_skip_whitespace(p);
+        }
+    }
+
+    p = json_skip_whitespace(p);
+    if (*p != '\0' || !seen || !valid_value)
+        return default_value;
+    return value;
+}
+
 static void extract_existing_host(const char *config_path,
                                    char *host_out, size_t host_len,
                                    int *width, int *height, int *fps,
                                    char *refresh_out, size_t refresh_len,
                                    double *packet_loss_max,
-                                   bool *idr_on_fec_failure)
+                                   bool *idr_on_fec_failure,
+                                   bool *dualsense_bluetooth_enhanced)
 {
     *host_out = '\0';
     if (refresh_out && refresh_len) *refresh_out = '\0';
     *width = 1920; *height = 1080; *fps = 60;
     if (packet_loss_max) *packet_loss_max = 0.05;
     if (idr_on_fec_failure) *idr_on_fec_failure = true;
+    if (dualsense_bluetooth_enhanced) *dualsense_bluetooth_enhanced = false;
 
     FILE *f = fopen(config_path, "r");
     if (!f) return;
@@ -340,6 +624,10 @@ static void extract_existing_host(const char *config_path,
                 *idr_on_fec_failure = false;
         }
     }
+
+    if (dualsense_bluetooth_enhanced)
+        *dualsense_bluetooth_enhanced = extract_unique_json_bool(
+            buf, "dualsense_bluetooth_enhanced", false);
 }
 
 /* ── JSON string escape ──────────────────────────────────────────────────────
@@ -509,9 +797,11 @@ ChiakiImportResult config_try_import_chiaki_ini(
     char existing_refresh[2048] = "";
     double packet_loss_max = 0.05;
     bool idr_on_fec_failure = true;
+    bool dualsense_bluetooth_enhanced = false;
     extract_existing_host(config_path, host, sizeof(host), &vid_w, &vid_h, &vid_fps,
                           existing_refresh, sizeof(existing_refresh),
-                          &packet_loss_max, &idr_on_fec_failure);
+                          &packet_loss_max, &idr_on_fec_failure,
+                          &dualsense_bluetooth_enhanced);
 
     if (d.packet_loss_max_set) {
         if (d.packet_loss_max >= 0.0 && d.packet_loss_max <= 1.0)
@@ -559,6 +849,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         "{\n"
         "    \"host\": \"%s\",\n"
         "    \"ps5\": %s,\n"
+        "    \"dualsense_bluetooth_enhanced\": %s,\n"
         "    \"psn_account_id\": \"%s\",\n"
         "    \"registered_key\": \"%s\",\n"
         "    \"rp_key\": \"%s\",\n"
@@ -581,6 +872,7 @@ ChiakiImportResult config_try_import_chiaki_ini(
         "}\n",
         esc_host,
         ps5 ? "true" : "false",
+        dualsense_bluetooth_enhanced ? "true" : "false",
         esc_psn,
         esc_rk,
         esc_rpk,
@@ -599,10 +891,11 @@ ChiakiImportResult config_try_import_chiaki_ini(
 
     app_log_always("[IMPORT] config.json written: host_set=%d ps5=%d rp_key_type=%d "
                    "codec=%s bitrate=%d loss_cap=%.2f idr_on_fec=%d "
-                   "sleep_on_exit=%d mac_set=%d\n",
+                   "ds_bt_enhanced=%d sleep_on_exit=%d mac_set=%d\n",
                    host[0] != '\0', ps5,
                    d.rp_key_type, codec, bitrate, packet_loss_max,
-                   idr_on_fec_failure, d.sleep_on_exit,
+                   idr_on_fec_failure, dualsense_bluetooth_enhanced,
+                   d.sleep_on_exit,
                    ps5_mac[0] != '\0');
 
     /* ── Rename INI so we don't re-import on next auto-launch ────────────── */

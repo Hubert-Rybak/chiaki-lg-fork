@@ -11,6 +11,12 @@ int main(void)
     uint16_t right = 0;
 
     rumble_policy_reset(&policy);
+    assert(!rumble_policy_prepare(&policy, true, 0, 0, 0,
+                                  &left, &right));
+    assert(!policy.valid);
+    assert(left == 0 && right == 0);
+
+    /* The first real effect stays immediate after the omitted initial stop. */
     assert(rumble_policy_prepare(&policy, true, 0, 0x1234, 0xabcd,
                                  &left, &right));
     assert(left == 0x1200 && right == 0xab00);
