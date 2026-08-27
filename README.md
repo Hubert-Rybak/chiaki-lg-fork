@@ -216,6 +216,108 @@ Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`
 
 Connect a gamepad via Bluetooth or USB. Supported controllers include DualSense, DualShock 4, Xbox Wireless Controller, and most HID-compliant gamepads.
 
+### Enable Bluetooth DualSense enhanced mode
+
+Enhanced mode is an experimental, rooted opt-in for Bluetooth rumble,
+adaptive triggers, LEDs, touch, and motion. It is not needed for USB
+DualSense. The current runtime profile supports only the exact OLED G1 entry
+in [Tested on](#tested-on): webOS `6.5.3`, firmware `03.53.45`, platform
+`O20N_DVB_EU`, `aarch64`, and kernel `4.4.84-229.kcl4tv.6`. A matching webOS
+version on a different model or SoC is not sufficient. The TV must be rooted,
+Homebrew Channel must report `Rooted: Yes`, and its root execution service must
+work; Developer Mode alone is not sufficient. The app starts and authenticates
+the temporary runtime itself. Do not install a kernel module, boot hook, or
+memory patch manually.
+
+1. Install a build containing commit `2a38355e` or a release that includes it.
+   Leave enhanced mode off, launch the app once, and first confirm that the
+   controller's buttons and axes work in basic mode. Close the app afterward.
+   If `/tmp/chiaki.log` warns that a legacy Chiaki controller module may still
+   be loaded, reboot the TV before continuing.
+2. Confirm that the TV is rooted and that these commands print the tested
+   architecture and kernel:
+
+   ```sh
+   uname -m
+   uname -r
+   ```
+
+   Expected output is `aarch64` and `4.4.84-229.kcl4tv.6`. Do not continue on
+   another result.
+3. Make a private backup, then edit the configuration belonging to the
+   installed app. Release builds use
+   `org.homebrew.chiaki.fork/config.json`; development builds use
+   `org.homebrew.chiaki.fork.dev/config.json`, both below:
+
+   ```text
+   /media/developer/apps/usr/palm/applications/
+   ```
+
+   Change the existing field to an unquoted JSON boolean:
+
+   ```json
+   "dualsense_bluetooth_enhanced": true
+   ```
+
+   Setting `"log_level": "info"` temporarily makes validation easier. Keep
+   the rest of the configuration unchanged and verify that the file remains
+   valid JSON.
+4. Fully power the controller off by holding its PS button for about ten
+   seconds. Start Chiaki, then reconnect the controller after the launcher
+   appears. This cold connection is required because Bluetooth enhanced mode
+   cannot be reversed until the controller itself is powered off.
+5. Start a stream and use a game that produces vibration. Watch the app log:
+
+   ```sh
+   tail -f /tmp/chiaki.log
+   ```
+
+   A successful session includes these lines (the promotion line also reports
+   the touchpad and sensors):
+
+   ```text
+   [DUALSENSE] Isolated Bluetooth output worker ready
+   [ROOT] Experimental DualSense Bluetooth runtime ready
+   [INPUT] DualSense Bluetooth policy: enhanced input, SDL output blocked
+   [INPUT] DualSense external enhanced promotion observed
+   [DUALSENSE] Isolated Bluetooth feedback active
+   [INPUT] First isolated DualSense rumble delivery confirmed
+   ```
+
+   The last line appears only after the streamed game produces a non-zero
+   vibration effect. Runtime activation and rollback details are recorded in
+   `/var/lib/webosbrew/chiaki-dualsense-runtime/runtime.log`.
+6. Close Chiaki normally after testing. The runtime log should end with
+   `DualSense Bluetooth runtime restored to native LG state`. The allowlist
+   and report correction are memory-only and also disappear on reboot.
+
+If any hardware fingerprint, root operation, daemon signature, or rollback
+check differs, the app exits before streaming instead of applying an unverified
+partial setup. Set `dualsense_bluetooth_enhanced` back to `false`, fully power
+off the controller, and restart Chiaki to return to basic Bluetooth input. Do
+not repeatedly retry, remove the runtime checks, delete its root-owned state,
+or copy the G1 hashes to another TV. Reboot first if a failed legacy module or
+ambiguous live state is suspected, then launch once with the option disabled so
+verified cleanup can retry.
+
+To request a profile for another rooted TV, provide its exact model, firmware,
+and the non-secret output of:
+
+```sh
+uname -m
+uname -r
+sha256sum /etc/configd/layers/base/com.webos.service.bthidmanager.json
+sha256sum /usr/lib/libbluetooth.default.so
+sha256sum /usr/sbin/webos-bluetooth-service
+```
+
+Also provide the focused `[ROOT]`, `[INPUT]`, and `[DUALSENSE]` log lines from
+a basic-mode launch, with IP and Bluetooth addresses redacted. Do not publish
+`config.json`, a chiaki-ng export, or a complete verbose log; they may contain
+PlayStation authentication material. A new profile still requires hardware
+validation of input, rumble, stability, and exact rollback before it can be
+enabled.
+
 The app bundles the hardware-tested webosbrew SDL 2.30.12 webOS.5 build and
 uses its standardized GameController mapping. Its app-jail device-presence
 poll keeps controller handles stable on webOS 6.5.3. The newer webOS.6 raw
@@ -229,15 +331,12 @@ Controller backend selection remains automatic. Bluetooth DualSense and
 DualSense Edge devices stay on SDL's PS5 HIDAPI path when available; the app
 does not disable HIDAPI or pin the controller to a `/dev/input/event*` node.
 Bluetooth starts in SDL's simple-report mode by default, providing stable
-buttons and axes without sending LG-sensitive output reports. Set
-`"dualsense_bluetooth_enhanced": true` only on the rooted, exact tested TV to
-start the experimental runtime for rumble, adaptive triggers, LEDs, touch, and
-motion. Unsupported TVs and failed runtime checks exit the requested launch
-without applying a partial fallback. To return to basic mode, set the field to
-`false`, close the app, fully power the controller off by holding its PS button
-for about ten seconds, then restart the app and reconnect it. A normal app
-restart cannot demote a controller that is already emitting enhanced reports.
-USB DualSense enters enhanced mode independently and retains its capabilities.
+buttons and axes without sending LG-sensitive output reports. The procedure
+and current exact-TV limitation are documented above. Unsupported TVs and
+failed runtime checks exit the requested launch without applying a partial
+fallback. A normal app restart cannot demote a controller that is already
+emitting enhanced reports; it must be fully powered off. USB DualSense enters
+enhanced mode independently and retains its capabilities.
 
 For ordinary controllers and USB DualSense, rumble remains on SDL's output
 path. For opted-in Bluetooth DualSense, the bundled SDL PS5 backend becomes
