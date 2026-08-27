@@ -79,12 +79,29 @@ def check_repository_wiring() -> None:
         str(PATCH_PATH.relative_to(ROOT)).replace("\\", "/"),
         'patch --directory="$source_dir" --strip=1 --fuzz=0 --batch',
         '-DWEBOS=ON',
+        '-DSDL_DBUS=OFF',
+        '-DSDL_ESD=OFF',
+        '-DSDL_IBUS=OFF',
+        '-DSDL_JACK=OFF',
+        '-DSDL_PIPEWIRE=OFF',
+        '-DSDL_SNDIO=OFF',
+        '-DSDL_STATIC=OFF',
+        '-DSDL_TEST=OFF',
         '-DSDL_WEBOS_BROKEN_ABI=OFF',
+        '-DSDL_WAYLAND_LIBDECOR=OFF',
         'cmake --build "$build_dir"',
         'cmake --install "$build_dir"',
         'tests/sdl_webos_input_only_patch_test.py" "$source_dir"',
     ):
         require(token in build_script, f"SDL source build is missing {token}")
+    require(
+        '#!/usr/bin/env bash\nset -o pipefail\n"$REAL_PKG_CONFIG"' in build_script,
+        "cross pkg-config wrapper must preserve missing-package failures",
+    )
+    require(
+        '$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig' in build_script,
+        "cross pkg-config search path must include target share metadata",
+    )
     require(
         "releases/download/$SDL2_WEBOS_RELEASE" not in build_script,
         "SDL-webOS must be compiled from source, not installed from a release binary",

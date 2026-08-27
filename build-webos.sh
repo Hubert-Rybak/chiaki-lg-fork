@@ -82,7 +82,7 @@ export AR="${CROSS_PREFIX}ar"
 export STRIP="${CROSS_PREFIX}strip"
 export RANLIB="${CROSS_PREFIX}ranlib"
 
-SYSROOT_PKGCONFIG="$SYSROOT/usr/lib/pkgconfig"
+SYSROOT_PKGCONFIG="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
 export PKG_CONFIG_PATH="$OUR_STAGING/lib/pkgconfig:$SYSROOT_PKGCONFIG"
 export PKG_CONFIG_LIBDIR="$OUR_STAGING/lib/pkgconfig:$SYSROOT_PKGCONFIG"
 # Set sysroot for system libs (SDL2 etc), but we'll strip it from staging paths via wrapper
@@ -103,6 +103,7 @@ mkdir -p "$OUR_STAGING/bin"
 SYSROOT_STAGING_PREFIX="$SYSROOT/tmp/webos-staging"
 cat > "$PKG_CONFIG_WRAPPER" << WRAPPER_EOF
 #!/usr/bin/env bash
+set -o pipefail
 "$REAL_PKG_CONFIG" "\$@" | sed "s|${SYSROOT_STAGING_PREFIX}|/tmp/webos-staging|g"
 WRAPPER_EOF
 chmod +x "$PKG_CONFIG_WRAPPER"
@@ -168,13 +169,22 @@ build_sdl2_webos() {
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$install_dir" \
         -DWEBOS=ON \
+        -DSDL_DBUS=OFF \
+        -DSDL_ESD=OFF \
+        -DSDL_IBUS=OFF \
+        -DSDL_JACK=OFF \
         -DSDL_OFFSCREEN=OFF \
         -DSDL_DISKAUDIO=OFF \
         -DSDL_DUMMYAUDIO=OFF \
         -DSDL_DUMMYVIDEO=OFF \
         -DSDL_KMSDRM=OFF \
+        -DSDL_PIPEWIRE=OFF \
+        -DSDL_SNDIO=OFF \
+        -DSDL_STATIC=OFF \
+        -DSDL_TEST=OFF \
         -DSDL_VENDOR_INFO="webOS Backport" \
-        -DSDL_WEBOS_BROKEN_ABI=OFF
+        -DSDL_WEBOS_BROKEN_ABI=OFF \
+        -DSDL_WAYLAND_LIBDECOR=OFF
     cmake --build "$build_dir" --config Release --parallel "$NJOBS"
     cmake --install "$build_dir" --config Release
 
