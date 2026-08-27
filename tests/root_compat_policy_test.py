@@ -100,11 +100,20 @@ for runtime_guard in (
     '/proc/self/fd/8',
     'chmod 0500 "$runtime_tmp"',
     '"$RUNTIME_STATE_DIR/activation.lock"',
+    "APP_EXE_ID=$(stat -Lc '%d:%i' \"/proc/$APP_PID/exe\"",
+    "BUNDLE_EXE_ID=$(stat -Lc '%d:%i' \"$BUNDLE_ROOT/chiaki-webos\"",
+    '[ "$APP_EXE_ID" = "$BUNDLE_EXE_ID" ]',
+    "Unsafe Chiaki executable identity.",
+    "Unsafe bundled Chiaki executable.",
 ):
     if runtime_guard not in install:
         raise SystemExit(f"Root runtime staging is not authenticated: {runtime_guard}")
 if "__RUNTIME_SOURCE_SHA256__" in install or "__UNINSTALL_SOURCE_SHA256__" in install:
     raise SystemExit("Root runtime source hashes were not finalized")
+if 'APP_EXE=$(readlink -f "/proc/$APP_PID/exe"' in install:
+    raise SystemExit("Jailed webOS app identity cannot be compared by pathname")
+if '[ "$APP_EXE" = "$BUNDLE_EXE" ]' in install:
+    raise SystemExit("Jailed webOS app identity cannot require pathname equality")
 
 for bootstrap_guard in (
     "ROOT_INSTALLER_SHA256",

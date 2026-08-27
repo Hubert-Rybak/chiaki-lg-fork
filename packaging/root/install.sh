@@ -178,15 +178,17 @@ fi
 if [ "$RUNTIME_REQUESTED" = true ]; then
     valid_decimal "$APP_PID" || { echo "Invalid runtime app PID."; exit 2; }
     [ -r "/proc/$APP_PID/stat" ] || { echo "Runtime app exited."; exit 75; }
-    APP_EXE=$(readlink -f "/proc/$APP_PID/exe" 2>/dev/null || true)
-    BUNDLE_EXE=$(readlink -f "$BUNDLE_ROOT/chiaki-webos" 2>/dev/null || true)
-    [ -n "$APP_EXE" ] && [ "$APP_EXE" = "$BUNDLE_EXE" ] || {
+    APP_EXE_ID=$(stat -Lc '%d:%i' "/proc/$APP_PID/exe" 2>/dev/null || true)
+    BUNDLE_EXE_ID=$(stat -Lc '%d:%i' "$BUNDLE_ROOT/chiaki-webos" \
+        2>/dev/null || true)
+    [ -n "$APP_EXE_ID" ] && [ "$APP_EXE_ID" = "$BUNDLE_EXE_ID" ] || {
         echo "Runtime PID is not this Chiaki executable."
         exit 77
     }
     [ "$(stat -Lc '%u:%a:%F' "/proc/$APP_PID/exe" 2>/dev/null)" = \
       "0:755:regular file" ] || { echo "Unsafe Chiaki executable identity."; exit 77; }
-    APP_EXE_ID=$(stat -Lc '%d:%i' "/proc/$APP_PID/exe")
+    [ "$(stat -Lc '%u:%a:%F' "$BUNDLE_ROOT/chiaki-webos" 2>/dev/null)" = \
+      "0:755:regular file" ] || { echo "Unsafe bundled Chiaki executable."; exit 77; }
     APP_START=$(awk '{print $22}' "/proc/$APP_PID/stat")
     valid_decimal "$APP_START" || { echo "Invalid runtime app identity."; exit 75; }
     stage_runtime

@@ -26,7 +26,7 @@
 #define ROOT_RESPONSE_MAX 4096
 #define ROOT_REBOOT_MARKER "/tmp/chiaki-dualsense-reboot-required"
 #define ROOT_INSTALLER_SHA256 \
-    "c1126c111a8886067fec5616ccae6d4b1ac66559969e52fd2522c061c61c58c4"
+    "d43a1de8db37dd4d475c718d0ee7264bc0594f521fe57c26738cf178c26cac02"
 
 static bool log_legacy_reboot_warning(void)
 {
