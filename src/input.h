@@ -1,11 +1,13 @@
 #pragma once
 
+#include <stdbool.h>
+
 #include <SDL2/SDL.h>
 #include <chiaki/session.h>
 
 typedef struct InputContext InputContext;
 
-InputContext *input_init(void);
+InputContext *input_init(bool dualsense_bluetooth_enhanced);
 void input_fini(InputContext *ctx);
 
 /* Controller hotplug/input and Magic Remote keys; call for every SDL event. */

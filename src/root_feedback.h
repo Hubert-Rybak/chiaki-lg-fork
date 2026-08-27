@@ -1,11 +1,11 @@
 #pragma once
 
+#include <stdbool.h>
+
 /*
- * Ask Homebrew Channel's optional elevated service to activate the bundled
- * DualSense compatibility components. The request is bounded and completes
- * before SDL opens input devices, allowing the compatibility driver to claim
- * an already-connected pad without disrupting an active input session. It is
- * a no-op when the TV is not rooted, the service is unavailable, or the
- * platform is not a signature-checked match.
+ * Ask Homebrew Channel's optional elevated service to clean legacy state and,
+ * only when explicitly requested, prepare the exact-TV volatile Bluetooth
+ * runtime. The bounded request runs before SDL or the video stack starts.
+ * Returns true only when the requested root operation completed successfully.
  */
-void root_feedback_bootstrap(void);
+bool root_feedback_bootstrap(bool dualsense_runtime_requested);

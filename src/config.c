@@ -80,6 +80,7 @@ static int config_write_defaults(const char *path)
         "{\n"
         "  \"host\": \"\",\n"
         "  \"ps5\": true,\n"
+        "  \"dualsense_bluetooth_enhanced\": false,\n"
         "  \"video_width\": 1920,\n"
         "  \"video_height\": 1080,\n"
         "  \"video_fps\": 60,\n"
@@ -134,6 +135,8 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->idr_on_fec_failure = json_get_bool_strict(root, "idr_on_fec_failure", true);
     cfg->audio_volume     = json_get_int(root,  "audio_volume",     100);
     cfg->ps5              = json_get_bool(root, "ps5",              true);
+    cfg->dualsense_bluetooth_enhanced = json_get_bool_strict(
+        root, "dualsense_bluetooth_enhanced", false);
     cfg->hw_decode        = json_get_bool(root, "hw_decode",        false);
     cfg->video_codec      = json_get_str(root,  "video_codec");
     cfg->wakeup           = json_get_bool(root, "wakeup",           true);
@@ -228,12 +231,14 @@ int config_load(AppConfig *cfg, const char *path)
     json_object_put(root);
 
     fprintf(stderr, "[CONFIG] Loaded: host=%s ps5=%d %dx%d@%dfps %dkbps "
-            "loss_cap=%.2f idr_on_fec=%d wakeup=%d psn_wakeup=%s "
+            "loss_cap=%.2f idr_on_fec=%d ds_bt_enhanced=%d "
+            "wakeup=%d psn_wakeup=%s "
             "sleep_on_exit=%d log_level=0x%x\n",
             cfg->host ? cfg->host : "(null)", cfg->ps5,
             cfg->video_width, cfg->video_height,
             cfg->video_fps, cfg->video_bitrate,
             cfg->packet_loss_max, cfg->idr_on_fec_failure,
+            cfg->dualsense_bluetooth_enhanced,
             cfg->wakeup,
             cfg->psn_refresh_token ? "YES" : "NO",
             cfg->sleep_on_exit, cfg->log_level);

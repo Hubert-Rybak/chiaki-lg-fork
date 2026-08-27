@@ -1,6 +1,7 @@
 {
     "host": "192.168.1.100",
     "ps5": true,
+    "dualsense_bluetooth_enhanced": false,
     "psn_account_id": "AAAAAAAAAA==",
     "registered_key": "AAAAAAAAAAAAAAAAAAAAAA==",
     "rp_key": "AAAAAAAAAAAAAAAAAAAAAA==",

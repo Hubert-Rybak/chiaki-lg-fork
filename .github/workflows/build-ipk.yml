@@ -30,8 +30,9 @@ env:
   GRPCIO_TOOLS_VERSION: 1.68.0
   SDL2_WEBOS_RELEASE: release-2.30.12-webos.5
   SDL2_WEBOS_VERSION: 2.30.12
+  SDL2_WEBOS_REF: 9f30a1f01e4d36aa5d3e4e04df5921b7a9d093ee
   SDL2_WEBOS_SONAME: libSDL2-2.0.so.0.3000.12
-  SDL2_WEBOS_SHA256: 4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334
+  SDL2_WEBOS_SOURCE_SHA256: 6be84fdf3792009cbf5ac94563957d5e742135d6c6aa8596bf930290332779ca
   LIBEVENT_VERSION: 2.1.12-stable
   LIBEVENT_SHA256: 92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb
 
@@ -145,16 +146,12 @@ jobs:
             build-essential \
             cmake \
             git \
-            gcc-aarch64-linux-gnu \
-            bc \
-            bison \
-            flex \
-            kmod \
             libtool \
             libssl-dev \
             libjson-c-dev \
             make \
             ninja-build \
+            patch \
             pkg-config \
             protobuf-compiler \
             python3-pip \
@@ -168,6 +165,40 @@ jobs:
             tests/config_import_test.c \
             -o "$RUNNER_TEMP/config-import-test"
           "$RUNNER_TEMP/config-import-test"
+
+      - name: Test PSN account ID compatibility
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Isrc -Ichiaki-ng/lib/include \
+            tests/psn_account_id_test.c src/psn_account_id.c \
+            chiaki-ng/lib/src/base64.c \
+            -o "$RUNNER_TEMP/psn-account-id-test"
+          "$RUNNER_TEMP/psn-account-id-test"
+
+      - name: Test SDL Bluetooth DualSense routing
+        shell: bash
+        run: |
+          python3 tests/sdl_input_routing_test.py
+          python3 tests/sdl_webos_input_only_patch_test.py
+
+      - name: Test controller touch and motion mapping
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Isrc -Ichiaki-ng/lib/include \
+            tests/controller_features_test.c src/controller_features.c \
+            chiaki-ng/lib/src/controller.c chiaki-ng/lib/src/orientation.c \
+            -lm -o "$RUNNER_TEMP/controller-features-test"
+          "$RUNNER_TEMP/controller-features-test"
+
+      - name: Test controller rumble output policy
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/rumble_policy_test.c src/rumble_policy.c \
+            -o "$RUNNER_TEMP/rumble-policy-test"
+          "$RUNNER_TEMP/rumble-policy-test"
 
       - name: Test stream configuration and recovery policy
         shell: bash
@@ -205,8 +236,14 @@ jobs:
         shell: bash
         run: |
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            $(pkg-config --cflags json-c) \
             -c src/root_feedback.c \
             -o "$RUNNER_TEMP/root-feedback.o"
+          cc -std=c11 -Wall -Wextra -Werror -Isrc \
+            tests/root_feedback_test.c \
+            $(pkg-config --cflags --libs json-c) \
+            -o "$RUNNER_TEMP/root-feedback-test"
+          "$RUNNER_TEMP/root-feedback-test"
           cc -std=c11 -Wall -Wextra -Werror -Isrc \
             tests/bt_patch_test.c src/bt_patch.c \
             -o "$RUNNER_TEMP/bt-patch-test"
@@ -221,20 +258,13 @@ jobs:
           test "$invalid_pid_status" -eq 2
           sh -n \
             packaging/root/install.sh \
+            packaging/root/bluetooth-runtime.sh \
             packaging/root/load.sh \
             packaging/root/boot-hook.sh \
             packaging/root/uninstall.sh
-          ! grep -F 'load.sh --rebind' packaging/root/boot-hook.sh
-          grep -F '"$STATE_DIR/load.sh" --rebind' packaging/root/install.sh
-          grep -F '%s --rebind-connected' src/root_feedback.c
-          grep -F 'chiaki-dualsense/load.sh' packaging/root/boot-hook.sh
-
-      - name: Build webOS 4.4 DualSense kernel module
-        shell: bash
-        run: |
-          bash kernel/build-webos-module.sh \
-            "$RUNNER_TEMP/linux-4.4-module" \
-            packaging/root/modules/aarch64/4.4.84/lg1212
+          grep -F 'Legacy compatibility state checked and cleaned' src/root_feedback.c
+          python3 tests/root_payload_hash_test.py
+          python3 tests/root_compat_policy_test.py
 
       - name: Install nanopb generator dependencies
         shell: bash
@@ -282,7 +312,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/webos-staging
-          key: webos-deps-v1-${{ runner.os }}-${{ hashFiles('build-webos.sh') }}
+          key: webos-deps-v2-${{ runner.os }}-${{ env.SDL2_WEBOS_REF }}-${{ env.SDL2_WEBOS_SOURCE_SHA256 }}-${{ hashFiles('build-webos.sh', 'patches/sdl-webos-2.30.12-webos.5-ps5-bt-input-only.patch', 'tests/sdl_webos_input_only_patch_test.py') }}
 
       - name: Build IPK
         shell: bash
@@ -312,7 +342,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/webos-staging
-          key: webos-deps-v1-${{ runner.os }}-${{ hashFiles('build-webos.sh') }}
+          key: webos-deps-v2-${{ runner.os }}-${{ env.SDL2_WEBOS_REF }}-${{ env.SDL2_WEBOS_SOURCE_SHA256 }}-${{ hashFiles('build-webos.sh', 'patches/sdl-webos-2.30.12-webos.5-ps5-bt-input-only.patch', 'tests/sdl_webos_input_only_patch_test.py') }}
 
       - name: Verify IPK
         shell: bash
@@ -366,20 +396,13 @@ jobs:
           cmp packaging/largeIcon.png "$packaged_root/largeIcon.png"
           test -s "$packaged_root/lib/libSDL2-2.0.so.0"
           test -s "$packaged_root/THIRD-PARTY-NOTICES.md"
-          test -s "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko"
           test -s "$packaged_root/root/install.sh"
           test -s "$packaged_root/root/load.sh"
           test -s "$packaged_root/root/boot-hook.sh"
           test -s "$packaged_root/root/uninstall.sh"
-          test -x "$packaged_root/root/chiaki-bt-patch"
-          "$TOOLCHAIN_DIR/bin/arm-webos-linux-gnueabi-readelf" -h \
-            "$packaged_root/root/chiaki-bt-patch" \
-            | grep -F 'Machine:' \
-            | grep -F 'ARM'
-          aarch64-linux-gnu-readelf -h \
-            "$packaged_root/root/modules/aarch64/4.4.84/lg1212/hid-playstation.ko" \
-            | grep -F 'Machine:' \
-            | grep -F 'AArch64'
+          test -x "$packaged_root/root/bluetooth-runtime.sh"
+          test ! -e "$packaged_root/root/modules"
+          test ! -e "$packaged_root/root/chiaki-bt-patch"
 
           packaged_binary="$(find "$inspect_dir" -type f -name chiaki-webos -print -quit)"
           if [[ -z "$packaged_binary" ]]; then

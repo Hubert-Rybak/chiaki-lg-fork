@@ -14,6 +14,12 @@ typedef struct {
     double   packet_loss_max;   // maximum loss reported to Chiaki congestion control (0.0-1.0)
     bool     idr_on_fec_failure;
     bool     ps5;
+    /*
+     * Bluetooth DualSense enhanced reports enable rumble, touch, and motion,
+     * but some older LG HID bridges disconnect the pad shortly after SDL sends
+     * the mode-switch report. Keep this opt-in; USB DualSense is unaffected.
+     */
+    bool     dualsense_bluetooth_enhanced;
     bool     hw_decode;
     char    *video_codec;       // "h265" (default), "h265_hdr" (PS5 HDR/HEVC), or "h264"
     int      audio_volume;

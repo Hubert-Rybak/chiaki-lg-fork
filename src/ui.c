@@ -1257,6 +1257,8 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_INT ("video_fps",     cfg->video_fps);
     SET_INT ("video_bitrate", cfg->video_bitrate);
     SET_BOOL("ps5",           cfg->ps5);
+    SET_BOOL("dualsense_bluetooth_enhanced",
+             cfg->dualsense_bluetooth_enhanced);
     SET_BOOL("hw_decode",     cfg->hw_decode);
     SET_BOOL("wakeup",        cfg->wakeup);
     SET_BOOL("sleep_on_exit", cfg->sleep_on_exit);

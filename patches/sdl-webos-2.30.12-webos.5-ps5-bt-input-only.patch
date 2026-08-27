@@ -1,0 +1,203 @@
+diff --git a/include/SDL_hints.h b/include/SDL_hints.h
+index 1277fc000..1dff238f2 100644
+--- a/include/SDL_hints.h
++++ b/include/SDL_hints.h
+@@ -920,6 +920,21 @@ extern "C" {
+  */
+ #define SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE "SDL_JOYSTICK_HIDAPI_PS5_RUMBLE"
+ 
++/**
++ *  \brief  A webOS-specific variable that makes Bluetooth DualSense and DualSense Edge controllers input-only.
++ *
++ *  This variable can be set to the following values:
++ *    "0"       - normal HIDAPI behavior (the default)
++ *    "1"       - do not send output or feature reports to Bluetooth DualSense controllers
++ *
++ *  Enhanced input reports that the controller is already sending are still
++ *  parsed, including touchpad and sensor data. USB controllers and non-Sony
++ *  PS5-compatible controllers are not affected.
++ *
++ *  This hint must be set before the controller is opened.
++ */
++#define SDL_HINT_JOYSTICK_HIDAPI_PS5_WEBOS_INPUT_ONLY "SDL_JOYSTICK_HIDAPI_PS5_WEBOS_INPUT_ONLY"
++
+ /**
+  *  \brief  A variable controlling whether the HIDAPI driver for Google Stadia controllers should be used.
+  *
+diff --git a/src/joystick/hidapi/SDL_hidapi_ps5.c b/src/joystick/hidapi/SDL_hidapi_ps5.c
+index 159a0e846..a8cfd68fc 100644
+--- a/src/joystick/hidapi/SDL_hidapi_ps5.c
++++ b/src/joystick/hidapi/SDL_hidapi_ps5.c
+@@ -226,6 +226,7 @@ typedef struct
+     SDL_bool touchpad_supported;
+     SDL_bool effects_supported;
+     SDL_bool enhanced_mode;
++    SDL_bool webos_bluetooth_input_only;
+     SDL_bool report_sensors;
+     SDL_bool report_touchpad;
+     SDL_bool hardware_calibration;
+@@ -277,6 +278,20 @@ static int ReadFeatureReport(SDL_hid_device *dev, Uint8 report_id, Uint8 *report
+     return SDL_hid_get_feature_report(dev, report, length);
+ }
+ 
++static SDL_bool HIDAPI_DriverPS5_IsWebOSBluetoothInputOnly(SDL_HIDAPI_Device *device)
++{
++#ifdef __WEBOS__
++    return (device->is_bluetooth &&
++            device->vendor_id == USB_VENDOR_SONY &&
++            (device->product_id == USB_PRODUCT_SONY_DS5 ||
++             device->product_id == USB_PRODUCT_SONY_DS5_EDGE) &&
++            SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS5_WEBOS_INPUT_ONLY, SDL_FALSE));
++#else
++    (void)device;
++    return SDL_FALSE;
++#endif
++}
++
+ static SDL_bool HIDAPI_DriverPS5_IsSupportedDevice(SDL_HIDAPI_Device *device, const char *name, SDL_GameControllerType type, Uint16 vendor_id, Uint16 product_id, Uint16 version, int interface_number, int interface_class, int interface_subclass, int interface_protocol)
+ {
+     Uint8 data[USB_PACKET_LENGTH];
+@@ -397,19 +412,23 @@ static SDL_bool HIDAPI_DriverPS5_InitDevice(SDL_HIDAPI_Device *device)
+         /* Connected over Bluetooth, using enhanced reports */
+         device->is_bluetooth = SDL_TRUE;
+         ctx->enhanced_mode = SDL_TRUE;
++        ctx->webos_bluetooth_input_only = HIDAPI_DriverPS5_IsWebOSBluetoothInputOnly(device);
+     } else {
+         /* Connected over Bluetooth, using simple reports (DirectInput enabled) */
+         device->is_bluetooth = SDL_TRUE;
++        ctx->webos_bluetooth_input_only = HIDAPI_DriverPS5_IsWebOSBluetoothInputOnly(device);
+ 
+         /* Games written prior the introduction of PS5 controller support in SDL will not be aware of
+            SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, but they did know SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE.
+            To support apps that only knew about the PS4 hint, we'll use the PS4 hint as the default.
+         */
+-        ctx->enhanced_mode = SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE,
+-                                                SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, SDL_FALSE));
++        if (!ctx->webos_bluetooth_input_only) {
++            ctx->enhanced_mode = SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE,
++                                                    SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, SDL_FALSE));
++        }
+     }
+ 
+-    if (ctx->enhanced_mode) {
++    if (ctx->enhanced_mode && !ctx->webos_bluetooth_input_only) {
+         /* Read the serial number (Bluetooth address in reverse byte order)
+            This will also enable enhanced reports over Bluetooth
+         */
+@@ -552,6 +571,10 @@ static void HIDAPI_DriverPS5_LoadCalibrationData(SDL_HIDAPI_Device *device)
+     int i, size;
+     Uint8 data[USB_PACKET_LENGTH];
+ 
++    if (ctx->webos_bluetooth_input_only) {
++        return;
++    }
++
+     size = ReadFeatureReport(device->dev, k_EPS5FeatureReportIdCalibration, data, sizeof(data));
+     if (size < 35) {
+ #ifdef DEBUG_PS5_CALIBRATION
+@@ -666,7 +689,7 @@ static int HIDAPI_DriverPS5_UpdateEffects(SDL_HIDAPI_Device *device, int effect_
+     SDL_DriverPS5_Context *ctx = (SDL_DriverPS5_Context *)device->context;
+     DS5EffectsState_t effects;
+ 
+-    if (!ctx->enhanced_mode || !ctx->effects_supported) {
++    if (ctx->webos_bluetooth_input_only || !ctx->enhanced_mode || !ctx->effects_supported) {
+         return SDL_Unsupported();
+     }
+ 
+@@ -749,6 +772,10 @@ static void HIDAPI_DriverPS5_CheckPendingLEDReset(SDL_HIDAPI_Device *device)
+     SDL_DriverPS5_Context *ctx = (SDL_DriverPS5_Context *)device->context;
+     SDL_bool led_reset_complete = SDL_FALSE;
+ 
++    if (ctx->webos_bluetooth_input_only) {
++        return;
++    }
++
+     if (ctx->enhanced_mode && ctx->sensors_supported && !ctx->use_alternate_report) {
+         const PS5StatePacketCommon_t *packet = &ctx->last_state.state;
+ 
+@@ -779,6 +806,10 @@ static void HIDAPI_DriverPS5_TickleBluetooth(SDL_HIDAPI_Device *device)
+ {
+     SDL_DriverPS5_Context *ctx = (SDL_DriverPS5_Context *)device->context;
+ 
++    if (ctx->webos_bluetooth_input_only) {
++        return;
++    }
++
+     if (ctx->enhanced_mode) {
+         /* This is just a dummy packet that should have no effect, since we don't set the CRC */
+         Uint8 data[78];
+@@ -821,11 +852,13 @@ static void HIDAPI_DriverPS5_SetEnhancedMode(SDL_HIDAPI_Device *device, SDL_Joys
+             }
+         }
+ 
+-        /* Switch into enhanced report mode */
+-        HIDAPI_DriverPS5_UpdateEffects(device, 0);
++        if (!ctx->webos_bluetooth_input_only) {
++            /* Switch into enhanced report mode */
++            HIDAPI_DriverPS5_UpdateEffects(device, 0);
+ 
+-        /* Update the light effects */
+-        HIDAPI_DriverPS5_UpdateEffects(device, (k_EDS5EffectLED | k_EDS5EffectPadLights));
++            /* Update the light effects */
++            HIDAPI_DriverPS5_UpdateEffects(device, (k_EDS5EffectLED | k_EDS5EffectPadLights));
++        }
+     }
+ }
+ 
+@@ -901,12 +934,14 @@ static SDL_bool HIDAPI_DriverPS5_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joy
+         /* Force initialization when opening the joystick */
+         ctx->enhanced_mode = SDL_FALSE;
+         HIDAPI_DriverPS5_SetEnhancedMode(device, joystick);
+-    } else {
++    } else if (!ctx->webos_bluetooth_input_only) {
+         SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE,
+                             SDL_PS5RumbleHintChanged, ctx);
+     }
+-    SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED,
+-                        SDL_PS5PlayerLEDHintChanged, ctx);
++    if (!ctx->webos_bluetooth_input_only) {
++        SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED,
++                            SDL_PS5PlayerLEDHintChanged, ctx);
++    }
+ 
+     return SDL_TRUE;
+ }
+@@ -939,6 +974,10 @@ static Uint32 HIDAPI_DriverPS5_GetJoystickCapabilities(SDL_HIDAPI_Device *device
+     SDL_DriverPS5_Context *ctx = (SDL_DriverPS5_Context *)device->context;
+     Uint32 result = 0;
+ 
++    if (ctx->webos_bluetooth_input_only) {
++        return 0;
++    }
++
+     if (ctx->enhanced_mode) {
+         if (ctx->lightbar_supported) {
+             result |= SDL_JOYCAP_LED;
+@@ -976,7 +1015,7 @@ static int HIDAPI_DriverPS5_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Jo
+     int *pending_size;
+     int maximum_size;
+ 
+-    if (!ctx->effects_supported) {
++    if (ctx->webos_bluetooth_input_only || !ctx->effects_supported) {
+         return SDL_Unsupported();
+     }
+ 
+@@ -1043,7 +1082,7 @@ static int HIDAPI_DriverPS5_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device,
+         return SDL_Unsupported();
+     }
+ 
+-    if (enabled) {
++    if (enabled && !ctx->webos_bluetooth_input_only) {
+         HIDAPI_DriverPS5_LoadCalibrationData(device);
+     }
+     ctx->report_sensors = enabled;
+@@ -1497,7 +1536,8 @@ static SDL_bool HIDAPI_DriverPS5_UpdateDevice(SDL_HIDAPI_Device *device)
+     if (device->is_bluetooth) {
+         if (packet_count == 0) {
+             /* Check to see if it looks like the device disconnected */
+-            if (SDL_TICKS_PASSED(now, ctx->last_packet + BLUETOOTH_DISCONNECT_TIMEOUT_MS)) {
++            if (!ctx->webos_bluetooth_input_only &&
++                SDL_TICKS_PASSED(now, ctx->last_packet + BLUETOOTH_DISCONNECT_TIMEOUT_MS)) {
+                 /* Send an empty output report to tickle the Bluetooth stack */
+                 HIDAPI_DriverPS5_TickleBluetooth(device);
+                 ctx->last_packet = now;
