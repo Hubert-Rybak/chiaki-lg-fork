@@ -1,8 +1,11 @@
 #pragma once
 
+#include <stdbool.h>
+
 /*
- * Ask Homebrew Channel's optional elevated service to remove app-owned state
- * left by earlier experimental compatibility builds. The bounded request runs
- * before SDL opens input devices. It is a no-op on unrooted or clean TVs.
+ * Ask Homebrew Channel's optional elevated service to clean legacy state and,
+ * only when explicitly requested, prepare the exact-TV volatile Bluetooth
+ * runtime. The bounded request runs before SDL or the video stack starts.
+ * Returns true only when the requested root operation completed successfully.
  */
-void root_feedback_bootstrap(void);
+bool root_feedback_bootstrap(bool dualsense_runtime_requested);

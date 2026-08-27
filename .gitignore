@@ -6,5 +6,7 @@ third-party/
 *.o
 *.a
 *.log
+__pycache__/
+*.pyc
 /tmp/
 .artifacts/

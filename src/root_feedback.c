@@ -21,10 +21,12 @@
 
 #define LUNA_SEND_PUB "/usr/bin/luna-send-pub"
 #define ROOT_EXEC_URI "luna://org.webosbrew.hbchannel.service/exec"
-#define ROOT_BOOTSTRAP_TIMEOUT_MS 10000
+#define ROOT_BOOTSTRAP_TIMEOUT_MS 25000
 #define ROOT_BOOTSTRAP_POLL_MS 50
 #define ROOT_RESPONSE_MAX 4096
 #define ROOT_REBOOT_MARKER "/tmp/chiaki-dualsense-reboot-required"
+#define ROOT_INSTALLER_SHA256 \
+    "c1126c111a8886067fec5616ccae6d4b1ac66559969e52fd2522c061c61c58c4"
 
 static bool log_legacy_reboot_warning(void)
 {
@@ -93,11 +95,11 @@ static void drain_root_response(
     response[*used] = '\0';
 }
 
-void root_feedback_bootstrap(void)
+bool root_feedback_bootstrap(bool dualsense_runtime_requested)
 {
     bool reboot_warning_logged = log_legacy_reboot_warning();
     if (access(LUNA_SEND_PUB, X_OK) != 0)
-        return;
+        return false;
 
     char installer[512];
     int n = snprintf(installer, sizeof(installer), "%s/root/install.sh",
@@ -105,24 +107,39 @@ void root_feedback_bootstrap(void)
     if (n < 0 || (size_t)n >= sizeof(installer) || access(installer, R_OK) != 0) {
         app_log("[ROOT] Bundled compatibility cleanup unavailable: %s\n",
                 n > 0 ? installer : "invalid path");
-        return;
+        return false;
     }
 
-    /* APP_ID is compile-time validated to [a-z0-9.-], so no shell quoting is needed. */
-    char payload[1200];
+    /* APP_ID is compile-time validated to [a-z0-9.-]. The installer is opened
+     * once by root, then ownership/mode/hash checked through that exact fd so a
+     * rename in the app's writable parent directory cannot swap the script. */
+    char runtime_option[96] = "";
+    if (dualsense_runtime_requested) {
+        n = snprintf(runtime_option, sizeof(runtime_option),
+                     " --dualsense-bluetooth-runtime %ld", (long)getpid());
+        if (n < 0 || (size_t)n >= sizeof(runtime_option))
+            return false;
+    }
+    char payload[2000];
     n = snprintf(payload, sizeof(payload),
-                 "{\"command\":\"/bin/sh %s %s\"}",
-                 installer, CHIAKI_APP_DIR);
+                 "{\"command\":\"exec 9<%s || exit 77; "
+                 "[ \\\"$(/bin/stat -Lc %%u:%%a /proc/self/fd/9)\\\" "
+                 "= \\\"0:755\\\" ] || exit 77; "
+                 "[ \\\"$(/usr/bin/sha256sum /proc/self/fd/9 | "
+                 "/usr/bin/awk '{print $1}')\\\" = \\\"%s\\\" ] || exit 77; "
+                 "exec /bin/sh /proc/self/fd/9 %s%s\"}",
+                 installer, ROOT_INSTALLER_SHA256, CHIAKI_APP_DIR,
+                 runtime_option);
     if (n < 0 || (size_t)n >= sizeof(payload)) {
         app_log("[ROOT] Compatibility cleanup command is too long\n");
-        return;
+        return false;
     }
 
     int response_pipe[2];
     if (pipe(response_pipe) != 0) {
         app_log_always("[ROOT] Could not capture Homebrew root response: %s\n",
                        strerror(errno));
-        return;
+        return false;
     }
     int pipe_flags = fcntl(response_pipe[0], F_GETFL, 0);
     if (pipe_flags >= 0)
@@ -134,7 +151,7 @@ void root_feedback_bootstrap(void)
         close(response_pipe[1]);
         app_log_always("[ROOT] Could not start Homebrew root bootstrap: %s\n",
                        strerror(errno));
-        return;
+        return false;
     }
     if (child == 0) {
         close(response_pipe[0]);
@@ -170,7 +187,7 @@ void root_feedback_bootstrap(void)
                            strerror(errno));
             if (!reboot_warning_logged)
                 (void)log_legacy_reboot_warning();
-            return;
+            return false;
         }
         if (elapsed_ms >= ROOT_BOOTSTRAP_TIMEOUT_MS) {
             kill(child, SIGKILL);
@@ -179,10 +196,10 @@ void root_feedback_bootstrap(void)
                                 sizeof(response), &response_used);
             close(response_pipe[0]);
             app_log_always("[ROOT] Homebrew root bootstrap timed out; "
-                           "continuing without legacy-state cleanup\n");
+                           "the enhanced launch must exit fail-closed\n");
             if (!reboot_warning_logged)
                 (void)log_legacy_reboot_warning();
-            return;
+            return false;
         }
         usleep(ROOT_BOOTSTRAP_POLL_MS * 1000);
         elapsed_ms += ROOT_BOOTSTRAP_POLL_MS;
@@ -195,7 +212,13 @@ void root_feedback_bootstrap(void)
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
         root_exec_response_success(response, response_error,
                                    sizeof(response_error))) {
-        app_log_always("[ROOT] Legacy compatibility state checked and cleaned\n");
+        app_log_always(
+            dualsense_runtime_requested
+                ? "[ROOT] Experimental DualSense Bluetooth runtime ready\n"
+                : "[ROOT] Legacy compatibility state checked and cleaned\n");
+        if (!reboot_warning_logged)
+            (void)log_legacy_reboot_warning();
+        return true;
     } else {
         if (!response_error[0])
             copy_root_error(response_error, sizeof(response_error),
@@ -205,4 +228,5 @@ void root_feedback_bootstrap(void)
     }
     if (!reboot_warning_logged)
         (void)log_legacy_reboot_warning();
+    return false;
 }

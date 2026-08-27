@@ -45,6 +45,7 @@
 #include "config_import.h"
 #include "app_id.h"
 #include "root_feedback.h"
+#include "dualsense.h"
 #include "psn_account_id.h"
 #include "webos_keys.h"
 
@@ -1250,9 +1251,6 @@ int main(int argc, char *argv[])
 
     app_log("[APP] config_path = %s\n", config_path);
 
-    /* Remove app-owned driver/patch state from older development builds. */
-    root_feedback_bootstrap();
-
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
 
@@ -1269,6 +1267,33 @@ int main(int argc, char *argv[])
     if (!cfg.log_level && g_log_file) {
         fclose(g_log_file);
         g_log_file = NULL;
+    }
+
+    /* Start the isolated writer before SDL/video/decoder threads exist. The
+     * exact-TV root runtime is enabled only when both halves are ready. */
+    bool dualsense_bluetooth_runtime_active = false;
+    if (cfg.dualsense_bluetooth_enhanced && dualsense_writer_start()) {
+        if (root_feedback_bootstrap(true)) {
+            dualsense_bluetooth_runtime_active = true;
+        } else {
+            dualsense_writer_stop();
+            app_log_always(
+                "[DUALSENSE] Requested enhanced Bluetooth runtime failed; "
+                "exiting so no late root activation can outlive this app\n");
+            config_free(&cfg);
+            if (g_log_file)
+                fclose(g_log_file);
+            return 1;
+        }
+    } else {
+        /* Also removes app-owned state left by older development builds. */
+        (void)root_feedback_bootstrap(false);
+    }
+    if (cfg.dualsense_bluetooth_enhanced &&
+        !dualsense_bluetooth_runtime_active) {
+        app_log_always(
+            "[DUALSENSE] Enhanced Bluetooth runtime unavailable; "
+            "falling back to stable basic input for this launch\n");
     }
 
     app_log_always("[APP] Connecting to %s  ps5=%d  %dx%d@%dfps\n",
@@ -1289,25 +1314,37 @@ int main(int argc, char *argv[])
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     /*
      * Bluetooth DualSense starts in a stable simple-report mode that exposes
-     * buttons and axes. Enhanced mode adds rumble, touch, and motion, but the
-     * LG webOS 6 HID bridge on some TVs classifies PID 0x0ce6 as unsupported
-     * and removes it after SDL sends the mode-switch report. Make enhanced
-     * Bluetooth explicitly opt-in and override any inherited SDL hint. USB
-     * DualSense enters enhanced mode independently and keeps all features.
-     */
+     * buttons and axes. Enhanced input adds touch and motion, but the LG webOS
+     * HID bridge on some TVs removes PID 0x0ce6 after an output or feature
+     * report. The patched SDL input-only policy retains enhanced input reports
+     * that the controller already sends without SDL writing back to it. USB
+     * DualSense and every other controller retain their normal SDL behavior.
+    */
     const char *dualsense_enhanced_hint =
-        cfg.dualsense_bluetooth_enhanced ? "1" : "0";
+        dualsense_bluetooth_runtime_active ? "1" : "0";
+#ifdef __WEBOS__
+    if (SDL_SetHintWithPriority(
+            SDL_HINT_JOYSTICK_HIDAPI_PS5_WEBOS_INPUT_ONLY,
+            dualsense_enhanced_hint,
+            SDL_HINT_OVERRIDE) != SDL_TRUE) {
+        app_log_always(
+            "[INPUT] Could not apply webOS DualSense Bluetooth input-only policy\n");
+    }
+#endif
     if (SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE,
                                 dualsense_enhanced_hint,
                                 SDL_HINT_OVERRIDE) != SDL_TRUE) {
         app_log_always(
             "[INPUT] Could not apply DualSense Bluetooth enhanced-mode policy\n");
     }
-    app_log_always("[INPUT] DualSense Bluetooth enhanced-mode policy: %s\n",
-                   cfg.dualsense_bluetooth_enhanced ? "enabled" : "basic");
+    app_log_always("[INPUT] DualSense Bluetooth policy: %s\n",
+                   dualsense_bluetooth_runtime_active
+                       ? "enhanced input, SDL output blocked"
+                       : "basic");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
+        dualsense_writer_stop();
         return 1;
     }
 
@@ -1352,6 +1389,7 @@ int main(int argc, char *argv[])
     {
         app_log("[APP] SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
+        dualsense_writer_stop();
         return 1;
     }
     app_log("[APP] SDL window created OK\n");
@@ -1373,6 +1411,7 @@ int main(int argc, char *argv[])
         app_log("[APP] SDL_CreateRenderer failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(g_window);
         SDL_Quit();
+        dualsense_writer_stop();
         return 1;
     }
 
@@ -1383,7 +1422,7 @@ int main(int argc, char *argv[])
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
 
-    InputContext *input_ctx = input_init(cfg.dualsense_bluetooth_enhanced);
+    InputContext *input_ctx = input_init(dualsense_bluetooth_runtime_active);
     if (!input_ctx)
         app_log_always("[INPUT] Initialization failed; continuing without a controller\n");
 
@@ -2063,6 +2102,9 @@ cleanup_ss4s:
 
 cleanup_sdl:
     input_fini(input_ctx);
+    /* Release motors/triggers before the app exit watcher restores LG's
+     * output-report byte and removes the volatile controller allowlist. */
+    dualsense_writer_stop();
     SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);
     SDL_Quit();

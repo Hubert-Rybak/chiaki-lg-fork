@@ -14,8 +14,9 @@ CHIAKI_NG_REF="${CHIAKI_NG_REF:-0c4a45df0cae2af2ba2daef84e881850b07038a3}"
 SS4S_REF="${SS4S_REF:-dfba721b85420ccabf91dac65be73984bf1865f9}"
 SDL2_WEBOS_RELEASE="${SDL2_WEBOS_RELEASE:-release-2.30.12-webos.5}"
 SDL2_WEBOS_VERSION="${SDL2_WEBOS_VERSION:-2.30.12}"
+SDL2_WEBOS_REF="${SDL2_WEBOS_REF:-9f30a1f01e4d36aa5d3e4e04df5921b7a9d093ee}"
 SDL2_WEBOS_SONAME="${SDL2_WEBOS_SONAME:-libSDL2-2.0.so.0.3000.12}"
-SDL2_WEBOS_SHA256="${SDL2_WEBOS_SHA256:-4ad566453d113bdd9ee96878176b97d28d9fa70503a62d83d55a351545abb334}"
+SDL2_WEBOS_SOURCE_SHA256="${SDL2_WEBOS_SOURCE_SHA256:-6be84fdf3792009cbf5ac94563957d5e742135d6c6aa8596bf930290332779ca}"
 LIBEVENT_VERSION="${LIBEVENT_VERSION:-2.1.12-stable}"
 LIBEVENT_SHA256="${LIBEVENT_SHA256:-92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb}"
 
@@ -118,36 +119,74 @@ mkdir -p "$BUILD_DIR"
 NJOBS=$(nproc)
 
 # ── SDL-webOS ────────────────────────────────────────────────────────────────
-# The TV's SDL 2.0.10 predates DualSense. Use the same webosbrew build proven by
-# punktfunk-webos, both for the standardized controller mapping and evdev FF.
-install_sdl2_webos() {
-    # Include the backport release in the marker: webOS fixes can change while
-    # the upstream SDL version and SONAME remain the same.
-    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_RELEASE"
+# The TV's SDL 2.0.10 predates DualSense. Build the hardware-tested SDL-webOS
+# release from its exact source commit, then apply the narrowly scoped webOS
+# Bluetooth DualSense input-only policy before compiling it.
+build_sdl2_webos() {
+    local patch_file="$SCRIPT_DIR/patches/sdl-webos-2.30.12-webos.5-ps5-bt-input-only.patch"
+    if [[ ! -f "$patch_file" ]]; then
+        echo "ERROR: SDL-webOS input-only patch is missing: $patch_file"
+        exit 1
+    fi
+
+    local patch_sha
+    patch_sha="$(sha256sum "$patch_file" | awk '{print $1}')"
+    local marker="$OUR_STAGING/.sdl-webos-$SDL2_WEBOS_REF-$SDL2_WEBOS_SOURCE_SHA256-$patch_sha"
     local runtime="$OUR_STAGING/lib/$SDL2_WEBOS_SONAME"
     if [[ -f "$marker" && -f "$runtime" &&
-          -f "$OUR_STAGING/include/SDL2/SDL_gamecontroller.h" ]]; then
-        echo "-- SDL-webOS $SDL2_WEBOS_RELEASE: skip"
+          -f "$OUR_STAGING/include/SDL2/SDL_gamecontroller.h" &&
+          -f "$OUR_STAGING/include/SDL2/SDL_hints.h" ]] &&
+       grep -Fq "SDL_JOYSTICK_HIDAPI_PS5_WEBOS_INPUT_ONLY" \
+           "$OUR_STAGING/include/SDL2/SDL_hints.h"; then
+        echo "-- SDL-webOS $SDL2_WEBOS_RELEASE ($SDL2_WEBOS_REF): skip"
         return
     fi
 
-    local asset="SDL2-$SDL2_WEBOS_VERSION-webos.tar.gz"
+    local asset="SDL-webOS-$SDL2_WEBOS_REF.tar.gz"
     local archive="/tmp/$asset"
-    local url="https://github.com/webosbrew/SDL-webOS/releases/download/$SDL2_WEBOS_RELEASE/$asset"
-    echo "-- Installing SDL-webOS $SDL2_WEBOS_RELEASE"
+    local url="https://codeload.github.com/webosbrew/SDL-webOS/tar.gz/$SDL2_WEBOS_REF"
+    echo "-- Building SDL-webOS $SDL2_WEBOS_RELEASE from $SDL2_WEBOS_REF"
     if [[ ! -f "$archive" ]] ||
-       ! echo "$SDL2_WEBOS_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
+       ! echo "$SDL2_WEBOS_SOURCE_SHA256  $archive" | sha256sum --check --strict >/dev/null 2>&1; then
         rm -f "$archive"
         curl --fail --location --retry 5 --output "$archive" "$url"
     fi
-    echo "$SDL2_WEBOS_SHA256  $archive" | sha256sum --check --strict
+    echo "$SDL2_WEBOS_SOURCE_SHA256  $archive" | sha256sum --check --strict
 
-    local extracted
-    extracted="$(mktemp -d /tmp/sdl-webos.XXXXXX)"
-    tar xzf "$archive" -C "$extracted"
+    local work_dir source_dir build_dir install_dir
+    work_dir="$(mktemp -d /tmp/sdl-webos.XXXXXX)"
+    source_dir="$work_dir/source"
+    build_dir="$work_dir/build"
+    install_dir="$work_dir/install"
+    mkdir -p "$source_dir" "$build_dir" "$install_dir"
+    tar xzf "$archive" -C "$source_dir" --strip-components=1
+    patch --directory="$source_dir" --strip=1 --fuzz=0 --batch --input="$patch_file"
+    python3 "$SCRIPT_DIR/tests/sdl_webos_input_only_patch_test.py" "$source_dir"
+
+    cmake -S "$source_dir" -B "$build_dir" \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$install_dir" \
+        -DWEBOS=ON \
+        -DSDL_OFFSCREEN=OFF \
+        -DSDL_DISKAUDIO=OFF \
+        -DSDL_DUMMYAUDIO=OFF \
+        -DSDL_DUMMYVIDEO=OFF \
+        -DSDL_KMSDRM=OFF \
+        -DSDL_VENDOR_INFO="webOS Backport" \
+        -DSDL_WEBOS_BROKEN_ABI=OFF
+    cmake --build "$build_dir" --config Release --parallel "$NJOBS"
+    cmake --install "$build_dir" --config Release
+
+    local built_runtime="$install_dir/lib/$SDL2_WEBOS_SONAME"
+    if [[ ! -f "$built_runtime" ]]; then
+        echo "ERROR: SDL-webOS build did not produce $SDL2_WEBOS_SONAME"
+        exit 1
+    fi
+
     mkdir -p "$OUR_STAGING/include/SDL2" "$OUR_STAGING/lib/pkgconfig"
-    cp -RL "$extracted/include/SDL2/." "$OUR_STAGING/include/SDL2/"
-    cp -L "$extracted/lib/$SDL2_WEBOS_SONAME" "$runtime"
+    cp -RL "$install_dir/include/SDL2/." "$OUR_STAGING/include/SDL2/"
+    cp -L "$built_runtime" "$runtime"
     ln -sf "$SDL2_WEBOS_SONAME" "$OUR_STAGING/lib/libSDL2-2.0.so.0"
     ln -sf "$SDL2_WEBOS_SONAME" "$OUR_STAGING/lib/libSDL2.so"
 
@@ -164,7 +203,7 @@ Libs: -L$OUR_STAGING/lib -lSDL2
 Cflags: -I$OUR_STAGING/include/SDL2 -D_REENTRANT
 SDL2_PC_EOF
     touch "$marker"
-    rm -rf "$extracted"
+    rm -rf "$work_dir"
 }
 
 # ── OpenSSL ───────────────────────────────────────────────────────────────────
@@ -474,7 +513,7 @@ build_jerasure() {
     echo "-- Jerasure built: ${#objects[@]} objects"
 }
 
-install_sdl2_webos
+build_sdl2_webos
 build_openssl
 build_opus
 build_jsonc

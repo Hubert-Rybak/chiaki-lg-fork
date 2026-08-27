@@ -19,6 +19,7 @@ static void test_report(void)
 {
     DualSenseOutputState state;
     memset(&state, 0, sizeof(state));
+    dualsense_output_state_set_rumble(&state, 0x80, 0x40);
     state.lightbar_set = 1;
     state.lightbar[0] = 1;
     state.lightbar[1] = 2;
@@ -36,14 +37,17 @@ static void test_report(void)
     assert(report[0] == 0x31);
     assert(report[1] == 0x30);
     assert(report[2] == 0x10);
-    assert(report[3] == (0x04 | 0x08));
+    assert(report[3] == (0x02 | 0x04 | 0x08));
     assert(report[4] == (0x04 | 0x10 | 0x40));
+    assert(report[3 + 2] == 0x40);
+    assert(report[3 + 3] == 0x80);
     assert(report[3 + 10] == 1);
     assert(report[3 + 21] == 2);
     assert(report[3 + 36] == 0x62);
     assert(report[3 + 43] == 0x1f);
     assert(report[3 + 44] == 1 && report[3 + 45] == 2 && report[3 + 46] == 3);
-    assert((report[3] & 0x01) == 0); /* quarantined report owns no rumble */
+    assert((report[3] & 0x01) == 0); /* legacy compatible-vibration stays off */
+    assert((report[3 + 38] & 0x04) != 0); /* vibration v2 */
 
     uint8_t signed_data[DUALSENSE_REPORT_LEN - 3];
     signed_data[0] = 0xa2;
@@ -56,14 +60,59 @@ static void test_report(void)
     assert(encoded == crc);
 }
 
+static void test_rumble_state(void)
+{
+    DualSenseOutputState a;
+    DualSenseOutputState b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+
+    assert(dualsense_output_state_equal(&a, &b));
+    assert(!dualsense_output_state_equal(NULL, &b));
+    assert(!dualsense_output_state_equal(&a, NULL));
+
+    dualsense_output_state_set_rumble(&a, 0x12, 0x34);
+    assert(a.rumble_owned == 1);
+    assert(a.motor_left == 0x12);
+    assert(a.motor_right == 0x34);
+    assert(!dualsense_output_state_equal(&a, &b));
+
+    dualsense_output_state_set_rumble(&b, 0x12, 0x34);
+    assert(dualsense_output_state_equal(&a, &b));
+    dualsense_output_state_set_rumble(&b, 0x12, 0x35);
+    assert(!dualsense_output_state_equal(&a, &b));
+}
+
+static void test_rumble_v2_vector(void)
+{
+    DualSenseOutputState state;
+    memset(&state, 0, sizeof(state));
+    dualsense_output_state_set_rumble(&state, 0x80, 0x80);
+
+    uint8_t report[DUALSENSE_REPORT_LEN];
+    dualsense_build_report(0, &state, report);
+    assert(report[0] == 0x31 && report[1] == 0x00 && report[2] == 0x10);
+    assert(report[3] == 0x02); /* haptics select */
+    assert(report[3 + 2] == 0x80); /* weak/right motor */
+    assert(report[3 + 3] == 0x80); /* strong/left motor */
+    assert(report[3 + 38] == 0x04); /* compatible vibration v2 */
+    assert(report[74] == 0xd5 && report[75] == 0xc7 &&
+           report[76] == 0xe3 && report[77] == 0xe3);
+}
+
 static void test_release_and_payload(void)
 {
     DualSenseOutputState released;
-    memset(&released, 0, sizeof(released));
-    released.triggers_owned = 1;
+    memset(&released, 0xa5, sizeof(released));
+    dualsense_output_state_release(&released);
+    assert(released.rumble_owned == 1);
+    assert(released.motor_left == 0 && released.motor_right == 0);
+    assert(released.triggers_owned == 1);
     uint8_t report[DUALSENSE_REPORT_LEN];
     dualsense_build_report(0, &released, report);
-    assert(report[3] == (0x04 | 0x08));
+    assert(report[3] == (0x02 | 0x04 | 0x08));
+    assert(report[3 + 2] == 0 && report[3 + 3] == 0);
+    assert((report[3 + 38] & 0x04) != 0);
     assert(report[3 + 10] == 0 && report[3 + 21] == 0);
 
     char payload[512];
@@ -101,6 +150,8 @@ int main(void)
 {
     test_crc();
     test_report();
+    test_rumble_state();
+    test_rumble_v2_vector();
     test_release_and_payload();
     test_old_webos_bluetooth_address();
     puts("DualSense protocol tests passed");
